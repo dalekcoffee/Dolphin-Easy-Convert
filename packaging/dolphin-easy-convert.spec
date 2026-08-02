@@ -82,5 +82,5 @@ appstream-util validate-relax --nonet \
 %{_metainfodir}/%{appid}.metainfo.xml
 
 %changelog
-* Sat Aug 02 2026 Dalek <dalekcoffee@users.noreply.github.com> - 0.1.0-1
+* Sun Aug 02 2026 Dalek <dalekcoffee@users.noreply.github.com> - 0.1.0-1
 - Initial package

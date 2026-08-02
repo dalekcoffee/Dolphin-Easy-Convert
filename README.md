@@ -64,7 +64,7 @@ scale-down cap.
 ## Install
 
 ```bash
-sudo dnf install rpm-build libappstream-glib   # build-time only
+sudo dnf install rpm-build python3-devel libappstream-glib   # build-time only
 ./build-rpm.sh
 sudo dnf install ./dist/dolphin-easy-convert-*.noarch.rpm
 ```

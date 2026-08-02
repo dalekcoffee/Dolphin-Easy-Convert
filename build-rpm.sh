@@ -14,9 +14,18 @@ NAME=dolphin-easy-convert
 SPEC=packaging/${NAME}.spec
 VERSION=$(awk '/^Version:/ {print $2; exit}' "$SPEC")
 
-if ! command -v rpmbuild >/dev/null 2>&1; then
-  echo "rpmbuild not found. Install it with:" >&2
-  echo "    sudo dnf install rpm-build libappstream-glib" >&2
+# Check everything the spec needs up front, so a missing build dependency is
+# reported once here rather than as an rpmbuild failure part way through.
+#   python3-devel      provides the %{python3_sitelib} macro
+#   libappstream-glib  provides appstream-util for the %check step
+missing=()
+for pkg in rpm-build python3-devel libappstream-glib; do
+  rpm -q "$pkg" >/dev/null 2>&1 || missing+=("$pkg")
+done
+if (( ${#missing[@]} )); then
+  echo "Missing build dependencies: ${missing[*]}" >&2
+  echo "Install them with:" >&2
+  echo "    sudo dnf install ${missing[*]}" >&2
   exit 1
 fi
 
@@ -32,7 +41,7 @@ if git rev-parse --git-dir >/dev/null 2>&1; then
 else
   tar czf "$TOP/SOURCES/${NAME}-${VERSION}.tar.gz" \
       --transform "s,^\.,${NAME}-${VERSION}," \
-      --exclude=.git --exclude=dist .
+      --exclude=.git --exclude=dist --exclude=__pycache__ .
 fi
 
 echo "==> rpmbuild"
