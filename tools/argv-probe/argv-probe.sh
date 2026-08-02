@@ -3,7 +3,8 @@
 # and click a service menu entry, does KDE run this ONCE with every path, or
 # once PER file?
 #
-# All it does is append its own arguments to a log in /tmp and show a dialog.
+# All it does is append its own arguments to a log (see LOG= below) and show a
+# dialog.
 # It does not read, write, move or convert any of the files you select — it
 # only prints their names.
 #
