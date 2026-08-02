@@ -1,0 +1,15 @@
+[Desktop Entry]
+Type=Service
+X-KDE-ServiceTypes=KonqPopupMenu/Plugin
+MimeType=all/allfiles;image/png;image/jpeg;video/mp4;audio/mpeg;text/plain;
+Actions=argvProbeUpper;argvProbeLower;
+
+[Desktop Action argvProbeUpper]
+Name=ARGV PROBE (%F - expect all files, one process)
+Icon=dialog-information
+Exec=@BIN@ pct_F %F
+
+[Desktop Action argvProbeLower]
+Name=ARGV PROBE (%f - expect one file per process)
+Icon=dialog-information
+Exec=@BIN@ pct_f %f
