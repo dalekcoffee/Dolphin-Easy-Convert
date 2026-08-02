@@ -85,6 +85,8 @@ def run_ffmpeg(job: Job, on_progress: ProgressFn,
     total = probe_duration(job.src)
     job.temp_dest.parent.mkdir(parents=True, exist_ok=True)
 
+    # temp_dest keeps the real extension on the end, so ffmpeg selects the
+    # muxer from it exactly as it would for the final filename.
     cmd = [
         exe, "-hide_banner", "-nostdin", "-loglevel", "error",
         "-nostats", "-progress", "pipe:1",
@@ -93,18 +95,8 @@ def run_ffmpeg(job: Job, on_progress: ProgressFn,
         "-y", str(job.temp_dest),
     ]
 
-    # ffmpeg infers the container from the extension; temp_dest is a dotfile
-    # with the real extension buried, so state it explicitly.
-    cmd[-1:-1] = ["-f", _container_for(job.preset.ext)] if _container_for(
-        job.preset.ext) else []
-
     _stream(cmd, job, on_progress, should_cancel,
             parse=lambda line: _parse_ffmpeg_line(line, total))
-
-
-def _container_for(ext: str) -> str | None:
-    """ffmpeg muxer name for an output extension, when it is not the ext."""
-    return {"m4a": "ipod", "jpg": "image2"}.get(ext)
 
 
 def _parse_ffmpeg_line(line: str, total: float | None) -> float | None:

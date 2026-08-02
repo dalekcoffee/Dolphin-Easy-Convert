@@ -85,8 +85,14 @@ class Job:
         Same filesystem as `dest`, so the final placement is a cheap rename
         rather than a copy, and a crash leaves this file rather than a
         corrupt `dest`.
+
+        The real extension stays on the end. ffmpeg picks its output muxer from
+        the filename, so a scratch name like ".clip.flac.part" leaves it unable
+        to choose a format and the encode fails before it starts.
         """
-        return self.dest.with_name(f".{self.dest.name}.dec-part-{os.getpid()}")
+        return self.dest.with_name(
+            f".{self.dest.stem}.dec-part-{os.getpid()}{self.dest.suffix}"
+        )
 
 
 def _unique(path: Path) -> Path:

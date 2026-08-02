@@ -1,7 +1,7 @@
 %global appid io.github.dalekcoffee.DolphinEasyConvert
 
 Name:           dolphin-easy-convert
-Version:        0.1.0
+Version:        0.1.1
 Release:        1%{?dist}
 Summary:        Right-click media conversion for Dolphin using ffmpeg and ImageMagick
 
@@ -82,5 +82,10 @@ appstream-util validate-relax --nonet \
 %{_metainfodir}/%{appid}.metainfo.xml
 
 %changelog
+* Sun Aug 02 2026 Dalek <dalekcoffee@users.noreply.github.com> - 0.1.1-1
+- Keep the output extension on the scratch filename so ffmpeg can select a
+  muxer; every ffmpeg preset failed to start without it
+- Add an OGG (Vorbis) output preset for audio and video sources
+
 * Sun Aug 02 2026 Dalek <dalekcoffee@users.noreply.github.com> - 0.1.0-1
 - Initial package

@@ -84,6 +84,11 @@ PRESETS: tuple[Preset, ...] = (
         needs=("flac",),
     ),
     Preset(
+        "ogg", "OGG (Vorbis)", _AV, "ogg", "ffmpeg",
+        ("-vn", "-c:a", "libvorbis", "-q:a", "5"),
+        needs=("libvorbis",),
+    ),
+    Preset(
         "opus", "Opus", _AV, "opus", "ffmpeg",
         ("-vn", "-c:a", "libopus", "-b:a", "128k"),
         needs=("libopus",),

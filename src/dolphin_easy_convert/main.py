@@ -72,7 +72,7 @@ def check(verbose: bool = True) -> int:
     if encoders:
         interesting = sorted(
             e for e in ("libx264", "libx265", "libsvtav1", "libvpx-vp9",
-                        "aac", "libopus", "libmp3lame", "flac")
+                        "aac", "libopus", "libvorbis", "libmp3lame", "flac")
             if e in encoders
         )
         notes.append("encoders        : " + (", ".join(interesting) or "none"))

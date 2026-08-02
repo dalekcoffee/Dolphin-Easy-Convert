@@ -4,7 +4,7 @@ X-KDE-ServiceTypes=KonqPopupMenu/Plugin
 X-KDE-Submenu=Convert To
 Icon=applications-multimedia
 MimeType=audio/mpeg;audio/flac;audio/x-flac;audio/x-wav;audio/wav;audio/ogg;audio/x-vorbis+ogg;audio/opus;audio/x-opus+ogg;audio/mp4;audio/x-m4a;audio/aac;audio/x-ms-wma;audio/x-aiff;audio/x-ape;audio/x-matroska;
-Actions=mp3;flac;opus;m4a;wav;custom;
+Actions=mp3;flac;ogg;opus;m4a;wav;custom;
 
 [Desktop Action mp3]
 Name=MP3
@@ -15,6 +15,11 @@ Exec=dolphin-easy-convert --preset mp3 %F
 Name=FLAC (lossless)
 Icon=audio-x-generic
 Exec=dolphin-easy-convert --preset flac %F
+
+[Desktop Action ogg]
+Name=OGG (Vorbis)
+Icon=audio-x-generic
+Exec=dolphin-easy-convert --preset ogg %F
 
 [Desktop Action opus]
 Name=Opus
