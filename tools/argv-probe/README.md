@@ -10,7 +10,7 @@ and deleted.
 
 ## What it does
 
-`argv-probe.sh` appends its own arguments to `/tmp/dolphin-argv-probe.log` and
+`argv-probe.sh` appends its own arguments to a log under `$XDG_RUNTIME_DIR` and
 pops up a dialog with the count. It never opens, modifies, moves or converts the
 files you select — it only prints their paths.
 
@@ -44,7 +44,7 @@ service menus. `kbuildsycoca6 --noincremental` may also refresh it.
 ## Report back
 
 ```bash
-cat /tmp/dolphin-argv-probe.log
+cat "${XDG_RUNTIME_DIR:-$HOME}/dolphin-argv-probe.log"
 ```
 
 ## Uninstall — removes every trace
@@ -52,5 +52,5 @@ cat /tmp/dolphin-argv-probe.log
 ```bash
 rm -f ~/.local/share/kio/servicemenus/zz-argv-probe.desktop \
       ~/.local/bin/argv-probe.sh \
-      /tmp/dolphin-argv-probe.log
+      "${XDG_RUNTIME_DIR:-$HOME}/dolphin-argv-probe.log"
 ```

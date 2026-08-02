@@ -10,7 +10,10 @@
 # Installed by hand into ~/.local/share/kio/servicemenus/ for one test, then
 # deleted. See tools/argv-probe/README.md.
 
-LOG=/tmp/dolphin-argv-probe.log
+# Logged under XDG_RUNTIME_DIR (/run/user/$UID, mode 0700, yours alone) rather
+# than /tmp, so a predictable name in a world-writable dir can't be pre-created
+# as a symlink and followed by the append below.
+LOG="${XDG_RUNTIME_DIR:-$HOME}/dolphin-argv-probe.log"
 
 {
   echo "--- invocation at $(date -Is) ---"
