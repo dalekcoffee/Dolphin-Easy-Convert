@@ -1,0 +1,37 @@
+[Desktop Entry]
+Type=Service
+X-KDE-ServiceTypes=KonqPopupMenu/Plugin
+X-KDE-Submenu=Convert To
+Icon=applications-multimedia
+MimeType=audio/mpeg;audio/flac;audio/x-flac;audio/x-wav;audio/wav;audio/ogg;audio/x-vorbis+ogg;audio/opus;audio/x-opus+ogg;audio/mp4;audio/x-m4a;audio/aac;audio/x-ms-wma;audio/x-aiff;audio/x-ape;audio/x-matroska;
+Actions=mp3;flac;opus;m4a;wav;custom;
+
+[Desktop Action mp3]
+Name=MP3
+Icon=audio-x-generic
+Exec=dolphin-easy-convert --preset mp3 %F
+
+[Desktop Action flac]
+Name=FLAC (lossless)
+Icon=audio-x-generic
+Exec=dolphin-easy-convert --preset flac %F
+
+[Desktop Action opus]
+Name=Opus
+Icon=audio-x-generic
+Exec=dolphin-easy-convert --preset opus %F
+
+[Desktop Action m4a]
+Name=M4A (AAC)
+Icon=audio-x-generic
+Exec=dolphin-easy-convert --preset m4a %F
+
+[Desktop Action wav]
+Name=WAV (uncompressed)
+Icon=audio-x-generic
+Exec=dolphin-easy-convert --preset wav %F
+
+[Desktop Action custom]
+Name=Custom…
+Icon=configure
+Exec=dolphin-easy-convert --custom %F

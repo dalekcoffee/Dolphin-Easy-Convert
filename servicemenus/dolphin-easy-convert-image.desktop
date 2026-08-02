@@ -1,0 +1,42 @@
+[Desktop Entry]
+Type=Service
+X-KDE-ServiceTypes=KonqPopupMenu/Plugin
+X-KDE-Submenu=Convert To
+Icon=applications-graphics
+MimeType=image/png;image/jpeg;image/webp;image/avif;image/tiff;image/bmp;image/gif;image/heif;image/heic;image/x-portable-pixmap;image/x-portable-graymap;image/x-tga;image/vnd.microsoft.icon;image/svg+xml;image/vnd.adobe.photoshop;image/x-xcf;image/jxl;
+Actions=png;jpeg;webp;avif;tiff;pdf;custom;
+
+[Desktop Action png]
+Name=PNG (lossless)
+Icon=image-x-generic
+Exec=dolphin-easy-convert --preset png %F
+
+[Desktop Action jpeg]
+Name=JPEG
+Icon=image-x-generic
+Exec=dolphin-easy-convert --preset jpeg %F
+
+[Desktop Action webp]
+Name=WebP
+Icon=image-x-generic
+Exec=dolphin-easy-convert --preset webp-img %F
+
+[Desktop Action avif]
+Name=AVIF (smallest)
+Icon=image-x-generic
+Exec=dolphin-easy-convert --preset avif %F
+
+[Desktop Action tiff]
+Name=TIFF
+Icon=image-x-generic
+Exec=dolphin-easy-convert --preset tiff %F
+
+[Desktop Action pdf]
+Name=PDF
+Icon=application-pdf
+Exec=dolphin-easy-convert --preset pdf %F
+
+[Desktop Action custom]
+Name=Custom…
+Icon=configure
+Exec=dolphin-easy-convert --custom %F

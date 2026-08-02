@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="addon">
+  <id>io.github.dalekcoffee.DolphinEasyConvert</id>
+  <extends>org.kde.dolphin.desktop</extends>
+
+  <name>Easy Convert</name>
+  <summary>Convert audio, video and images from Dolphin's right-click menu</summary>
+
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>MIT</project_license>
+
+  <description>
+    <p>
+      Adds a Convert To submenu to Dolphin's right-click menu for audio, video
+      and image files. Conversions run through ffmpeg and ImageMagick, which
+      are installed from your existing dnf repositories.
+    </p>
+    <p>
+      Selecting several files converts them as a single batch with one progress
+      window, showing per-file and overall progress with a cancel button.
+    </p>
+    <p>
+      Each conversion asks where the results should go: into a converted
+      subfolder, alongside the originals with those moved into an originals
+      subfolder, or all in the same folder with -conv appended to the new
+      files. Originals are never deleted and existing files are never
+      overwritten.
+    </p>
+  </description>
+
+  <url type="homepage">https://github.com/dalekcoffee/Dolphin-Easy-Convert</url>
+  <url type="bugtracker">https://github.com/dalekcoffee/Dolphin-Easy-Convert/issues</url>
+
+  <provides>
+    <binary>dolphin-easy-convert</binary>
+  </provides>
+
+  <releases>
+    <release version="0.1.0" date="2026-08-02"/>
+  </releases>
+
+  <content_rating type="oars-1.1"/>
+</component>

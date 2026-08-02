@@ -1,0 +1,47 @@
+[Desktop Entry]
+Type=Service
+X-KDE-ServiceTypes=KonqPopupMenu/Plugin
+X-KDE-Submenu=Convert To
+Icon=applications-multimedia
+MimeType=video/mp4;video/x-matroska;video/webm;video/quicktime;video/x-msvideo;video/x-ms-wmv;video/x-flv;video/mpeg;video/mp2t;video/ogg;video/3gpp;video/x-ms-asf;video/x-m4v;
+Actions=mp4H264;mkvH265;webmVp9;mp4Av1;gif;sepMp3;sepFlac;custom;
+
+[Desktop Action mp4H264]
+Name=MP4 (H.264)
+Icon=video-x-generic
+Exec=dolphin-easy-convert --preset mp4-h264 %F
+
+[Desktop Action mkvH265]
+Name=MKV (H.265 / smaller)
+Icon=video-x-generic
+Exec=dolphin-easy-convert --preset mkv-h265 %F
+
+[Desktop Action webmVp9]
+Name=WebM (VP9)
+Icon=video-x-generic
+Exec=dolphin-easy-convert --preset webm-vp9 %F
+
+[Desktop Action mp4Av1]
+Name=MP4 (AV1 / smallest)
+Icon=video-x-generic
+Exec=dolphin-easy-convert --preset mp4-av1 %F
+
+[Desktop Action gif]
+Name=Animated GIF
+Icon=image-gif
+Exec=dolphin-easy-convert --preset gif %F
+
+[Desktop Action sepMp3]
+Name=Extract audio as MP3
+Icon=audio-x-generic
+Exec=dolphin-easy-convert --preset mp3 %F
+
+[Desktop Action sepFlac]
+Name=Extract audio as FLAC
+Icon=audio-x-generic
+Exec=dolphin-easy-convert --preset flac %F
+
+[Desktop Action custom]
+Name=Custom…
+Icon=configure
+Exec=dolphin-easy-convert --custom %F
