@@ -64,6 +64,9 @@ scale-down cap.
 ## Install
 
 ```bash
+git clone https://github.com/dalekcoffee/Dolphin-Easy-Convert.git
+cd Dolphin-Easy-Convert
+
 sudo dnf install rpm-build python3-devel libappstream-glib   # build-time only
 ./build-rpm.sh
 sudo dnf install ./dist/dolphin-easy-convert-*.noarch.rpm
@@ -76,6 +79,16 @@ the package installs against either Fedora's `ffmpeg-free` or RPM Fusion's
 
 Then restart Dolphin, or run `kbuildsycoca6 --noincremental`, for the menu to
 appear.
+
+### Update to a newer version
+
+```bash
+git pull
+./build-rpm.sh
+sudo dnf install ./dist/dolphin-easy-convert-*.noarch.rpm
+```
+
+`dnf install` on a package that is already present upgrades it in place.
 
 ### Check your setup
 
@@ -92,8 +105,9 @@ available. It only reports — it never installs anything.
 sudo dnf remove dolphin-easy-convert
 ```
 
-Or from Discover's installed list. The package ships AppStream metainfo so it
-appears there properly, though `dnf remove` is the path that is known to work.
+The package ships AppStream metainfo, but in testing on Fedora 44 it did not
+surface reliably in Discover's search or installed list, so `dnf remove` (or
+`dnf` in a terminal) is the supported way to remove it.
 
 ## How it hooks into KDE
 
