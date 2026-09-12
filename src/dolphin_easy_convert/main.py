@@ -22,6 +22,10 @@ from pathlib import Path
 
 from . import __version__
 from .jobs import media_of
+from .kde import (
+    SUBMENU_FIXED_IN, format_version, installed_servicemenus, kio_version,
+    submenu_is_broken,
+)
 from .presets import (
     Media, PRESETS_BY_ID, ffmpeg_encoders, missing_requirements, tool_path,
 )
@@ -46,6 +50,7 @@ def _fail(message: str) -> int:
 def check(verbose: bool = True) -> int:
     """Verify the environment. Reports; never installs anything itself."""
     problems: list[str] = []
+    advisories: list[str] = []
     notes: list[str] = []
 
     desktop = os.environ.get("XDG_CURRENT_DESKTOP", "")
@@ -54,6 +59,18 @@ def check(verbose: bool = True) -> int:
     else:
         notes.append(f"desktop         : {desktop or 'unknown'} "
                      f"(expected KDE — the menus will not appear elsewhere)")
+
+    kio = kio_version()
+    notes.append("KIO frameworks  : "
+                 + (format_version(kio) if kio else "unknown"))
+
+    menus = installed_servicemenus()
+    if menus:
+        notes.append(f"service menus   : {len(menus)} installed")
+        notes.extend(f"                  {menu}" for menu in menus)
+    else:
+        problems.append("no Convert To menu files are installed — expected "
+                        "them in /usr/share/kio/servicemenus")
 
     for binary, package in REQUIRED_PACKAGES.items():
         path = tool_path(binary)
@@ -77,10 +94,36 @@ def check(verbose: bool = True) -> int:
         )
         notes.append("encoders        : " + (", ".join(interesting) or "none"))
 
+    if menus and submenu_is_broken(kio):
+        advisories.append(
+            f"KIO {format_version(kio)} does not honour X-KDE-Submenu, so the "
+            f"whole Convert To\n"
+            f"    submenu is absent from Dolphin's context menu. Nothing is "
+            f"wrong with\n"
+            f"    this install and reinstalling it cannot help — the menu "
+            f"files are\n"
+            f"    read correctly and their entries are then dropped before "
+            f"the menu\n"
+            f"    is drawn.\n"
+            f"\n"
+            f"    KDE bug 524239, fixed in KDE Frameworks "
+            f"{format_version(SUBMENU_FIXED_IN)}:\n"
+            f"        sudo dnf update --refresh 'kf6-kio*'\n"
+            f"\n"
+            f"    If that version has not reached your mirror yet, see "
+            f"Troubleshooting\n"
+            f"    in the README for a stopgap you can undo afterwards."
+        )
+
     if verbose:
         print(f"Easy Convert {__version__}")
         for note in notes:
             print("  " + note)
+
+    if advisories:
+        print("\nKnown KDE issue:", file=sys.stderr)
+        for advisory in advisories:
+            print("  - " + advisory, file=sys.stderr)
 
     if problems:
         print("\nProblems found:", file=sys.stderr)
@@ -93,6 +136,9 @@ def check(verbose: bool = True) -> int:
         if packages:
             print("\nInstall the missing pieces with:\n"
                   f"  sudo dnf install {' '.join(packages)}", file=sys.stderr)
+        return 1
+
+    if advisories:
         return 1
 
     if verbose:

@@ -6,6 +6,10 @@ submenu to audio, video and image files, driven by ffmpeg and ImageMagick.
 Built and verified against **Fedora 44 KDE, Plasma 6.7.3, KDE Frameworks 6.28**.
 No attempt is made to support other distributions.
 
+> **KDE Frameworks 6.29 hides this menu.** A KIO regression in that one release
+> drops every submenu-grouped context-menu entry. It is fixed in 6.30 — see
+> [Troubleshooting](#troubleshooting).
+
 ## What it does
 
 - **Right-click one or many files** → *Convert To* → a preset, or *Custom…*
@@ -96,8 +100,77 @@ sudo dnf install ./dist/dolphin-easy-convert-*.noarch.rpm
 dolphin-easy-convert --check
 ```
 
-Reports the desktop environment, the three tools, PyQt6, and which encoders are
-available. It only reports — it never installs anything.
+Reports the desktop environment, the installed KIO version, where the menu
+files landed, the three tools, PyQt6, and which encoders are available. It only
+reports — it never installs anything.
+
+## Troubleshooting
+
+### The Convert To menu vanished after a system update
+
+Nothing in this package broke. **KDE Frameworks 6.29**, released 2026-08-14,
+discards every context-menu entry that a service menu groups under
+`X-KDE-Submenu`, which is how all three of the menu files here are written. The
+files are still read; their entries are thrown away before the menu is drawn,
+so the submenu never appears. Reinstalling cannot help, because there is
+nothing wrong with what gets installed.
+
+That is [KDE bug 524239](https://bugs.kde.org/show_bug.cgi?id=524239) —
+Dolphin's [bug 525484](https://bugs.kde.org/show_bug.cgi?id=525484) is the same
+fault reported from the file-manager side — and it is **fixed in KDE Frameworks
+6.30**, released 2026-09-09.
+
+Confirm which side of that line you are on:
+
+```bash
+dolphin-easy-convert --check
+```
+
+It prints the KIO version and names this bug outright when the version is an
+affected one. To fix it:
+
+```bash
+sudo dnf update --refresh 'kf6-kio*'   # or a full sudo dnf upgrade
+```
+
+Then restart Dolphin, or run `kbuildsycoca6 --noincremental`.
+
+#### If 6.30 has not reached your mirror yet
+
+Put ungrouped copies of the menu files in your home directory, where KIO reads
+them alongside the packaged ones:
+
+```bash
+mkdir -p ~/.local/share/kio/servicemenus
+for f in /usr/share/kio/servicemenus/dolphin-easy-convert-*.desktop; do
+  grep -v '^X-KDE-Submenu=' "$f" \
+      > ~/.local/share/kio/servicemenus/"flat-$(basename "$f")"
+done
+kbuildsycoca6 --noincremental
+```
+
+Every conversion then sits directly in Dolphin's *Actions* submenu instead of
+under *Convert To* — nine entries for a video file, which is exactly why the
+package groups them normally.
+
+**Remove these copies as soon as you have 6.30.** The packaged menu files start
+working again at that point, and leaving the flat copies in place gets you both
+sets:
+
+```bash
+rm ~/.local/share/kio/servicemenus/flat-dolphin-easy-convert-*.desktop
+kbuildsycoca6 --noincremental
+```
+
+### The menu is missing and `--check` says no menu files are installed
+
+That one really is the install. Reinstall the package and rebuild the KDE
+service cache:
+
+```bash
+sudo dnf install ./dist/dolphin-easy-convert-*.noarch.rpm
+kbuildsycoca6 --noincremental
+```
 
 ## Uninstall
 
@@ -124,6 +197,7 @@ src/dolphin_easy_convert/
   presets.py   format definitions + runtime encoder probing
   jobs.py      output paths, placement modes, collision handling
   runner.py    subprocess execution + progress parsing
+  kde.py       KIO version probing + the known submenu regression
   ui.py        the PyQt6 window
   main.py      CLI entry point used by the menu files
 servicemenus/  three .desktop files (video, audio, image)

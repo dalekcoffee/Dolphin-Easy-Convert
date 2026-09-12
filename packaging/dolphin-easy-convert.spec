@@ -1,7 +1,7 @@
 %global appid io.github.dalekcoffee.DolphinEasyConvert
 
 Name:           dolphin-easy-convert
-Version:        0.1.1
+Version:        0.1.2
 Release:        1%{?dist}
 Summary:        Right-click media conversion for Dolphin using ffmpeg and ImageMagick
 
@@ -82,6 +82,13 @@ appstream-util validate-relax --nonet \
 %{_metainfodir}/%{appid}.metainfo.xml
 
 %changelog
+* Sat Sep 12 2026 Dalek <dalekcoffee@users.noreply.github.com> - 0.1.2-1
+- Report the installed KIO version and where the menu files landed in
+  --check, so a missing menu can be told apart from a broken install
+- Name KDE bug 524239 outright when running on KDE Frameworks 6.29, whose
+  KIO drops every entry grouped under X-KDE-Submenu; fixed in Frameworks 6.30
+- Document the regression and a stopgap in the README
+
 * Sun Aug 02 2026 Dalek <dalekcoffee@users.noreply.github.com> - 0.1.1-1
 - Keep the output extension on the scratch filename so ffmpeg can select a
   muxer; every ffmpeg preset failed to start without it
