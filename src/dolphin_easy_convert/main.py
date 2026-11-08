@@ -144,7 +144,10 @@ def main(argv: list[str] | None = None) -> int:
     if args.check:
         return check()
 
-    paths = [p for p in args.files]
+    # Absolute, so a relative name such as "-x.mkv" can never reach a tool as
+    # an option; de-duplicated (order kept), so one file is not converted, or
+    # in "originals" mode moved, twice.
+    paths = list(dict.fromkeys(p.absolute() for p in args.files))
     if not paths:
         return _fail("no files given")
 

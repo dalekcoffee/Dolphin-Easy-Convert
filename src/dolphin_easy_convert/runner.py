@@ -12,6 +12,7 @@ fall back to an indeterminate bar rather than reporting a wrong number.
 
 from __future__ import annotations
 
+import os
 import re
 import signal
 import subprocess
@@ -86,7 +87,6 @@ def run_ffmpeg(job: Job, on_progress: ProgressFn,
         raise RuntimeError("ffmpeg is not installed")
 
     total = probe_duration(job.src)
-    job.temp_dest.parent.mkdir(parents=True, exist_ok=True)
 
     # temp_dest keeps the real extension on the end, so ffmpeg selects the
     # muxer from it exactly as it would for the final filename.
@@ -98,8 +98,13 @@ def run_ffmpeg(job: Job, on_progress: ProgressFn,
         "-y", str(job.temp_dest),
     ]
 
-    _stream(cmd, job, on_progress, should_cancel,
-            parse=lambda line: _parse_ffmpeg_line(line, total))
+    try:
+        _stream(cmd, job, on_progress, should_cancel,
+                parse=lambda line: _parse_ffmpeg_line(line, total))
+    except RuntimeError as exc:
+        if "-vn" in job.preset.args and "does not contain any stream" in str(exc):
+            raise RuntimeError("this file has no audio track to extract") from exc
+        raise
 
 
 def _parse_ffmpeg_line(line: str, total: float | None) -> float | None:
@@ -158,8 +163,6 @@ def run_magick(job: Job, on_progress: ProgressFn,
     if not exe:
         raise RuntimeError("ImageMagick (magick) is not installed")
 
-    job.temp_dest.parent.mkdir(parents=True, exist_ok=True)
-
     decode_first = (job.src.suffix.lower() in FFMPEG_DECODE_FALLBACK
                     and not magick_can_read(magick_format(job.src.suffix)))
     encode_after = job.preset.ext == "avif" and avif_backend() == "ffmpeg"
@@ -200,13 +203,34 @@ def run_magick(job: Job, on_progress: ProgressFn,
         else:
             target, out_fmt = job.temp_dest, job.preset.ext
 
-        # "[0]" takes the first frame, so a multi-page input yields one output
-        # file rather than magick silently writing foo-0.png, foo-1.png, ...
-        spec = f"{source}[0]" if job.preset.ext != "pdf" else str(source)
-        cmd = [exe, spec, "-monitor", *args, f"{out_fmt}:{target}"]
-        tail = _stream(cmd, job, stage_progress, should_cancel,
-                       parse=_parse_magick_line)
-        _require_output(target, tail, "ImageMagick")
+        def convert(src: Path) -> None:
+            # "[0]" takes the first frame, so a multi-page input yields one
+            # output file rather than magick writing foo-0.png, foo-1.png...
+            spec = f"{src}[0]" if job.preset.ext != "pdf" else str(src)
+            cmd = [exe, spec, "-monitor", *args, f"{out_fmt}:{target}"]
+            tail = _stream(cmd, job, stage_progress, should_cancel,
+                           parse=_parse_magick_line)
+            _require_output(target, tail, "ImageMagick")
+
+        try:
+            convert(source)
+        except RuntimeError as exc:
+            # ImageMagick registers a HEIC reader even when libheif has no
+            # HEVC decoder (Fedora's libheif lacks one unless RPM Fusion's
+            # libheif-freeworld is installed), so "r" in -list format is not
+            # a promise. Retry once via ffmpeg.
+            if (decode_first
+                    or job.src.suffix.lower() not in FFMPEG_DECODE_FALLBACK
+                    or not tool_path("ffmpeg")):
+                raise
+            decoded = job.scratch("decode", "png")
+            scratch.append(decoded)
+            try:
+                _ffmpeg_decode_still(job, job.src, decoded, stage_progress,
+                                     should_cancel)
+            except RuntimeError as ff_exc:
+                raise RuntimeError(f"ImageMagick: {exc}; {ff_exc}") from exc
+            convert(decoded)
         done += 1
 
         if encode_after:
@@ -359,20 +383,28 @@ def _lines(stream) -> Iterator[str]:
         yield buffer
 
 
-def _terminate(proc: subprocess.Popen) -> None:
-    """Stop a child politely, then firmly."""
+def _signal_group(proc: subprocess.Popen, sig: int) -> None:
+    # The child leads its own process group (start_new_session), so this
+    # also reaches helpers it spawned: Ghostscript, rsvg, inkscape...
     try:
-        proc.send_signal(signal.SIGTERM)
+        os.killpg(proc.pid, sig)
+    except (ProcessLookupError, PermissionError):
+        pass
+
+
+def _terminate(proc: subprocess.Popen) -> None:
+    """Stop a child and anything it started, politely, then firmly."""
+    _signal_group(proc, signal.SIGTERM)
+    try:
         proc.wait(timeout=5)
     except subprocess.TimeoutExpired:
-        proc.kill()
-    except OSError:
-        pass
+        _signal_group(proc, signal.SIGKILL)
 
 
 def run(job: Job, on_progress: ProgressFn,
         should_cancel: Callable[[], bool]) -> None:
     """Dispatch a job to the right tool."""
+    job.prepare()
     if job.preset.tool == "ffmpeg":
         run_ffmpeg(job, on_progress, should_cancel)
     else:

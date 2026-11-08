@@ -41,35 +41,41 @@ class Preset:
 
 _AV = (Media.VIDEO, Media.AUDIO)
 
+# Video presets pass -sn. Without it ffmpeg carries one subtitle stream over
+# and must re-encode it into the target's subtitle format (mov_text for MP4,
+# WebVTT for WebM), which fails outright for bitmap subtitles such as the
+# PGS/VobSub tracks common in MKV rips: "Subtitle encoding currently only
+# possible from text to text or bitmap to bitmap".
+
 PRESETS: tuple[Preset, ...] = (
     # ---- video -> video -------------------------------------------------
     Preset(
         "mp4-h264", "MP4 (H.264)", (Media.VIDEO,), "mp4", "ffmpeg",
-        ("-c:v", "libx264", "-crf", "20", "-preset", "medium",
+        ("-sn", "-c:v", "libx264", "-crf", "20", "-preset", "medium",
          "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart"),
         needs=("libx264", "aac"),
     ),
     Preset(
         "mkv-h265", "MKV (H.265 / smaller)", (Media.VIDEO,), "mkv", "ffmpeg",
-        ("-c:v", "libx265", "-crf", "24", "-preset", "medium",
+        ("-sn", "-c:v", "libx265", "-crf", "24", "-preset", "medium",
          "-c:a", "aac", "-b:a", "192k"),
         needs=("libx265", "aac"),
     ),
     Preset(
         "webm-vp9", "WebM (VP9)", (Media.VIDEO,), "webm", "ffmpeg",
-        ("-c:v", "libvpx-vp9", "-crf", "32", "-b:v", "0",
+        ("-sn", "-c:v", "libvpx-vp9", "-crf", "32", "-b:v", "0",
          "-c:a", "libopus", "-b:a", "128k"),
         needs=("libvpx-vp9", "libopus"),
     ),
     Preset(
         "mp4-av1", "MP4 (AV1 / smallest)", (Media.VIDEO,), "mp4", "ffmpeg",
-        ("-c:v", "libsvtav1", "-crf", "32", "-preset", "6",
+        ("-sn", "-c:v", "libsvtav1", "-crf", "32", "-preset", "6",
          "-c:a", "libopus", "-b:a", "128k"),
         needs=("libsvtav1", "libopus"),
     ),
     Preset(
         "gif", "Animated GIF", (Media.VIDEO,), "gif", "ffmpeg",
-        ("-vf", "fps=12,scale=480:-1:flags=lanczos,"
+        ("-sn", "-an", "-vf", "fps=12,scale=480:-1:flags=lanczos,"
                 "split[a][b];[a]palettegen[p];[b][p]paletteuse",
          "-loop", "0"),
     ),

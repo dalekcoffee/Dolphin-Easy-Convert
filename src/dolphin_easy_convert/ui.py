@@ -67,7 +67,8 @@ class ConvertWorker(QThread):
             try:
                 runner.run(
                     job,
-                    on_progress=lambda f: self.file_progress.emit(f),
+                    on_progress=lambda f: self.file_progress.emit(
+                        -1.0 if f is None else float(f)),
                     should_cancel=lambda: self._cancel,
                 )
                 jobs_mod.finalise(job)
@@ -94,6 +95,23 @@ class ConvertWorker(QThread):
 # quality overrides for the Custom… entry
 # --------------------------------------------------------------------------
 
+def quality_range(preset: Preset) -> tuple[int, int] | None:
+    """Valid values for the preset's quality knob, or None if it has none."""
+    if "-crf" in preset.args:
+        # x264/x265 stop at 51; VP9 and SVT-AV1 go to 63.
+        if {"libx264", "libx265"} & set(preset.needs):
+            return (0, 51)
+        return (0, 63)
+    if "-quality" in preset.args:
+        return (1, 100)
+    if "-b:a" in preset.args:
+        return (32, 320)
+    if "-q:a" in preset.args:
+        # VBR scale: LAME 0 (best) to 9; Vorbis 0 to 10 (best).
+        return (0, 9) if "libmp3lame" in preset.needs else (0, 10)
+    return None
+
+
 def apply_overrides(preset: Preset, quality: int | None,
                     max_width: int | None) -> Preset:
     """Return a copy of `preset` with quality and scaling adjusted."""
@@ -106,13 +124,21 @@ def apply_overrides(preset: Preset, quality: int | None,
             args[args.index("-quality") + 1] = str(quality)
         elif "-b:a" in args:
             args[args.index("-b:a") + 1] = f"{quality}k"
+        elif "-q:a" in args:
+            args[args.index("-q:a") + 1] = str(quality)
 
     if max_width and preset.tool == "ffmpeg" and "-vn" not in args:
         # Only shrink; never upscale a small source to the cap.
         scale = f"scale='min({max_width},iw)':-2"
         if "-vf" in args:
             i = args.index("-vf") + 1
-            args[i] = f"{args[i]},{scale}"
+            if "palettegen" in args[i]:
+                # GIF: the chain ends in paletteuse, and scaling after it
+                # would throw the palette away. Tighten its own scale step.
+                args[i] = args[i].replace(
+                    "scale=480:-1", f"scale='min({max_width},480)':-1", 1)
+            else:
+                args[i] = f"{args[i]},{scale}"
         else:
             args += ["-vf", scale]
     elif max_width and preset.tool == "magick":
@@ -135,6 +161,7 @@ class ConvertDialog(QDialog):
         self._preset = preset
         self._worker: ConvertWorker | None = None
         self._jobs: list[Job] = []
+        self._close_when_done = False
         self._settings = QSettings(ORG, ORG)
 
         self.setWindowTitle("Convert")
@@ -190,10 +217,9 @@ class ConvertDialog(QDialog):
         form.addRow("Convert to:", self._format_combo)
 
         self._quality = QSpinBox()
-        self._quality.setRange(0, 320)
         self._quality.setSpecialValueText("preset default")
-        self._quality.setValue(0)
         form.addRow("Quality:", self._quality)
+        self._format_combo.currentIndexChanged.connect(self._update_quality)
 
         self._max_width = QComboBox()
         self._max_width.addItem("Original size", 0)
@@ -201,17 +227,31 @@ class ConvertDialog(QDialog):
             self._max_width.addItem(f"max {width}px wide", width)
         form.addRow("Scale:", self._max_width)
 
-        hint = QLabel("<small>Quality: lower is better for video (CRF ~18-28), "
-                      "higher is better for images (0-100) and audio (kbps)."
-                      "</small>")
+        hint = QLabel("<small>Quality: lower is better for video (CRF ~18-28) "
+                      "and MP3 (0-9); higher is better for images (1-100), "
+                      "OGG (0-10) and other audio (kbps).</small>")
         hint.setWordWrap(True)
         form.addRow(hint)
 
         if self._format_combo.count() == 0:
             self._format_combo.addItem("no usable encoder found", None)
             self._format_combo.setEnabled(False)
+        self._update_quality()
 
         return box
+
+    def _update_quality(self) -> None:
+        """Fit the quality spinner to the selected format's real range.
+
+        The lowest value is the "preset default" sentinel, one below the
+        smallest real setting, so CRF 0 (lossless) stays selectable.
+        """
+        preset = self._format_combo.currentData()
+        lo_hi = quality_range(preset) if preset is not None else None
+        self._quality.setEnabled(lo_hi is not None)
+        lo, hi = lo_hi or (0, 0)
+        self._quality.setRange(lo - 1, hi)
+        self._quality.setValue(lo - 1)
 
     def _build_placement_box(self) -> QWidget:
         box = QGroupBox("Where should the files go?")
@@ -253,6 +293,8 @@ class ConvertDialog(QDialog):
         layout.addWidget(self._overall_bar)
 
         self._file_label = QLabel("")
+        # Filenames are untrusted: render them as text, never as rich text.
+        self._file_label.setTextFormat(Qt.TextFormat.PlainText)
         self._file_label.setSizePolicy(QSizePolicy.Policy.Ignored,
                                        QSizePolicy.Policy.Preferred)
         layout.addWidget(self._file_label)
@@ -298,7 +340,9 @@ class ConvertDialog(QDialog):
                                     "No encoder on this system can produce "
                                     "that format.")
                 return
-            quality = self._quality.value() or None
+            quality = (None if self._quality.value() == self._quality.minimum()
+                       or not self._quality.isEnabled()
+                       else self._quality.value())
             width = self._max_width.currentData() or None
             preset = apply_overrides(preset, quality, width)
 
@@ -371,6 +415,8 @@ class ConvertDialog(QDialog):
         self._cancel_btn.setVisible(False)
         self._close_btn.setVisible(True)
         self._close_btn.setDefault(True)
+        if self._close_when_done:
+            self.accept()
 
     def _append_log(self, text: str) -> None:
         self._log.appendPlainText(text)
@@ -379,13 +425,28 @@ class ConvertDialog(QDialog):
         if self._worker is not None:
             self._cancel_btn.setEnabled(False)
             self._cancel_btn.setText("Stopping…")
-            self._overall_label.setText("Cancelling after the current file…")
+            self._overall_label.setText("Stopping the current file…")
             self._worker.cancel()
 
+    def _running(self) -> bool:
+        return self._worker is not None and self._worker.isRunning()
+
+    def reject(self) -> None:  # noqa: D102 - Escape key / Cancel role
+        # While converting, Escape must stop the encoder and wait for the
+        # worker, not hide the window and let the app exit underneath a
+        # running thread (Qt aborts) and an orphaned encoder.
+        if self._running():
+            self._close_when_done = True
+            self._cancel()
+            return
+        super().reject()
+
     def closeEvent(self, event) -> None:  # noqa: N802 - Qt naming
-        if self._worker is not None and self._worker.isRunning():
-            self._worker.cancel()
-            self._worker.wait(10_000)
+        if self._running():
+            self._close_when_done = True
+            self._cancel()
+            event.ignore()  # closed for real once the worker has finished
+            return
         super().closeEvent(event)
 
 

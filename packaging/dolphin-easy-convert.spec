@@ -1,7 +1,7 @@
 %global appid io.github.dalekcoffee.DolphinEasyConvert
 
 Name:           dolphin-easy-convert
-Version:        0.1.2
+Version:        0.1.3
 Release:        1%{?dist}
 Summary:        Right-click media conversion for Dolphin using ffmpeg and ImageMagick
 
@@ -85,6 +85,28 @@ appstream-util validate-relax --nonet \
 %{_metainfodir}/%{appid}.metainfo.xml
 
 %changelog
+* Sun Nov 08 2026 Dalek <dalekcoffee@users.noreply.github.com> - 0.1.3-1
+- Fix files in one batch with the same name (clip.mkv, clip.mov) being
+  planned onto the same output, the second overwriting the first
+- Place finished files with an atomic no-replace move, so nothing that
+  appears mid-conversion is overwritten; dangling symlinks count as taken
+- Create scratch files with random names, exclusively and without
+  following symlinks
+- Pass absolute paths to every tool, so a file named "-x.mkv" or
+  "msl:x.png" cannot be read as an option or a coder/protocol prefix
+- Refuse images whose content is XML, PostScript, PDF or MVG instead of
+  the format their name claims, so ImageMagick never runs them through
+  those interpreters
+- Stop the whole process group on cancel, including ImageMagick helpers
+- Escape or closing the window while converting now cancels and waits,
+  instead of exiting under a running thread
+- Drop subtitles in video presets; bitmap subtitles made MP4/WebM fail
+- Retry HEIC/AVIF decoding with ffmpeg when ImageMagick fails to read them
+- Quality box: real per-format ranges, CRF 0 selectable, works for MP3
+  and OGG, disabled for formats without a quality setting
+- GIF scale cap applies before palette generation
+- Show filenames as plain text; say "no audio track" for silent videos
+
 * Sun Nov 08 2026 Dalek <dalekcoffee@users.noreply.github.com> - 0.1.2-1
 - Fix AVIF conversions: probe ImageMagick for AVIF read/write support, which
   depends on libheif's AV1 plugins, instead of assuming it

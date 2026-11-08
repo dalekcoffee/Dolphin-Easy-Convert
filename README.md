@@ -34,14 +34,22 @@ Tick **Remember this choice as my default** to have it pre-selected next time.
 - **Never deletes.** The `originals` mode *moves* a file, and only after that
   file's conversion has succeeded.
 - **Never overwrites.** A name collision gets a number: `clip-conv.mp4`,
-  `clip-conv-1.mp4`, and so on.
+  `clip-conv-1.mp4`, and so on. That includes two files in one batch that
+  would produce the same name (`clip.mkv` and `clip.mov` → MP4), and the final
+  move is an atomic no-replace, so a file that appears mid-conversion is
+  stepped around too.
 - **Never leaves a half-written file in place.** Encoding writes to a hidden
   scratch file in the destination folder, which is renamed into position only
   after the encoder exits successfully. A crash or a cancel leaves the scratch
   file, not a corrupt result.
 - **Never uses a shell.** Commands are built as argument lists, so filenames
   containing spaces, quotes or shell metacharacters are passed through
-  literally.
+  literally. Paths are always absolute, so a name like `-x.mkv` or
+  `msl:x.png` can't be read as an option or a format prefix.
+- **Won't run disguised scripts through ImageMagick.** ImageMagick picks a
+  decoder from a file's content, not its name, so an image whose content is
+  really XML/SVG, PostScript, PDF or drawing commands is skipped with a
+  message. Genuine `.svg` files are still converted.
 
 The file to read if you want to verify all of that is
 [`src/dolphin_easy_convert/jobs.py`](src/dolphin_easy_convert/jobs.py) — it is
@@ -53,7 +61,9 @@ Presets are filtered at runtime against `ffmpeg -encoders`, so anything your
 ffmpeg build cannot produce never appears in the menu.
 
 - **Video** → MP4 (H.264), MKV (H.265), WebM (VP9), MP4 (AV1), animated GIF,
-  and audio extraction to MP3 or FLAC
+  and audio extraction to MP3, OGG or FLAC. Video presets drop subtitle
+  tracks: bitmap subtitles (PGS/VobSub) can't be converted to MP4 or WebM
+  subtitle formats and would otherwise make the whole conversion fail.
 - **Audio** → MP3, FLAC, Opus, M4A (AAC), WAV
 - **Image** → PNG, JPEG, WebP, AVIF, TIFF, PDF
 
