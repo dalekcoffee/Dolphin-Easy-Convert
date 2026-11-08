@@ -49,6 +49,10 @@ echo "==> rpmbuild"
 rpmbuild --define "_topdir $TOP" -bb "$SPEC"
 
 mkdir -p dist
+# Drop this package's earlier builds, so dist/ holds exactly one version and
+# "dnf install ./dist/dolphin-easy-convert-*.noarch.rpm" can't pick up two.
+# Only our own build outputs in dist/ (git-ignored) are touched.
+rm -f dist/"${NAME}"-*.rpm
 find "$TOP/RPMS" -name '*.rpm' -exec cp -v {} dist/ \;
 
 echo

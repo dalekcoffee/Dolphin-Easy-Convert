@@ -165,12 +165,19 @@ appear.
 ### Update to a newer version
 
 ```bash
-git pull
-./build-rpm.sh
-sudo dnf install ./dist/dolphin-easy-convert-*.noarch.rpm
+./update.sh
 ```
 
-`dnf install` on a package that is already present upgrades it in place.
+It fetches the latest version of the branch you're on, shows what changed,
+runs the tests, builds the RPM and installs it (asking for your sudo password
+only for that step), then refreshes Dolphin's menus. It stops without
+changing anything if you have local edits, if your branch can't simply be
+fast-forwarded, or if the tests or build fail. `./update.sh --help` lists the
+options (`--force` to reinstall anyway, `--yes` to skip dnf's confirmation,
+or a branch name to switch to).
+
+The only network access is `git fetch` from this repository. After updating,
+close and reopen Dolphin to see new menu entries.
 
 ### Check your setup
 
@@ -216,6 +223,7 @@ servicemenus/  three .desktop files (video, audio, image)
 packaging/     RPM spec, AppStream metainfo, /usr/bin launcher, hidden .desktop
 tests/         standard-library unit tests (run during the RPM build)
 tools/         one-off probes used to verify KDE behaviour; not packaged
+update.sh      fetch, test, build and reinstall in one step
 ```
 
 Run the tests from the repository root:
