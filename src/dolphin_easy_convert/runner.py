@@ -22,7 +22,7 @@ from pathlib import Path
 
 from .jobs import Job
 from .presets import (  # noqa: F401 - MAGICK_POLICY_DIR re-exported
-    MAGICK_POLICY_DIR, magick_env,
+    MAGICK_POLICY_DIR, ffmpeg_encoders, magick_env,
     FFMPEG_DECODE_FALLBACK, avif_backend, avif_ffmpeg_encoder, magick_can_read,
     magick_format, tool_path,
 )
@@ -138,7 +138,7 @@ def run_ffmpeg(job: Job, on_progress: ProgressFn,
     if not exe:
         raise RuntimeError("ffmpeg is not installed")
 
-    total = probe_duration(job.src)
+    total = _clip_length(job.preset.input_args, probe_duration(job.src))
 
     # temp_dest keeps the real extension on the end, so ffmpeg selects the
     # muxer from it exactly as it would for the final filename.
@@ -154,6 +154,7 @@ def run_ffmpeg(job: Job, on_progress: ProgressFn,
     cmd = [
         exe, "-hide_banner", "-nostdin", "-loglevel", "error",
         "-nostats", "-progress", "pipe:1",
+        *job.preset.input_args,
         *FFMPEG_LOCAL_ONLY, "-i", str(job.src),
         *args,
         "-y", str(job.temp_dest),
@@ -161,6 +162,62 @@ def run_ffmpeg(job: Job, on_progress: ProgressFn,
 
     _stream(cmd, job, on_progress, should_cancel,
             parse=lambda line: _parse_ffmpeg_line(line, total))
+
+
+def _clip_length(input_args: tuple[str, ...],
+                 duration: float | None) -> float | None:
+    """Length ffmpeg will actually encode, given -ss/-t trimming."""
+    def value(opt: str) -> float | None:
+        if opt in input_args:
+            try:
+                return float(input_args[input_args.index(opt) + 1])
+            except (IndexError, ValueError):
+                return None
+        return None
+    start, length = value("-ss") or 0.0, value("-t")
+    if duration is not None:
+        remaining = max(duration - start, 0.0)
+        length = remaining if length is None else min(length, remaining)
+    return length if length and length > 0 else None
+
+
+def is_animated(path: Path) -> bool:
+    """True if an image file holds more than one frame (animated GIF...)."""
+    exe = tool_path("magick")
+    if not exe:
+        return False
+    try:
+        res = subprocess.run(
+            [exe, "identify", "-ping", "-format", "%n\n", str(path)],
+            capture_output=True, text=True, timeout=30, check=False,
+            env=magick_env())
+        return int(res.stdout.split()[0]) > 1
+    except (OSError, ValueError, IndexError, subprocess.SubprocessError):
+        return False
+
+
+def run_animated_webp(job: Job, on_progress: ProgressFn,
+                      should_cancel: Callable[[], bool]) -> None:
+    """Animated GIF -> animated WebP with ffmpeg, keeping every frame and
+    its timing (ImageMagick would need libwebpmux, which builds may lack)."""
+    exe = tool_path("ffmpeg")
+    if not exe:
+        raise RuntimeError("ffmpeg is not installed")
+    args = job.preset.args
+    quality = args[args.index("-quality") + 1] if "-quality" in args else "85"
+    cmd = [exe, "-hide_banner", "-nostdin", "-loglevel", "error",
+           "-nostats", "-progress", "pipe:1",
+           *FFMPEG_LOCAL_ONLY, "-i", str(job.src)]
+    if "-resize" in args:
+        width = args[args.index("-resize") + 1].rstrip("x>")
+        cmd += ["-vf", f"scale='min({width},iw)':-2:flags=lanczos"]
+    cmd += ["-c:v", "libwebp_anim", "-loop", "0", "-quality", quality,
+            "-compression_level", "4", "-an", "-f", "webp",
+            "-y", str(job.temp_dest)]
+    total = probe_duration(job.src)
+    tail = _stream(cmd, job, on_progress, should_cancel,
+                   parse=lambda line: _parse_ffmpeg_line(line, total))
+    _require_output(job.temp_dest, tail, "ffmpeg")
 
 
 def _cover_stream(path: Path) -> int | None:
@@ -485,9 +542,33 @@ def _terminate(proc: subprocess.Popen) -> None:
 
 def run(job: Job, on_progress: ProgressFn,
         should_cancel: Callable[[], bool]) -> None:
-    """Dispatch a job to the right tool."""
+    """Dispatch a job to the right tool.
+
+    A job planned for the graphics card that fails there (driver missing a
+    codec, odd source format) is re-run once on the processor, with a note,
+    instead of failing.
+    """
+    try:
+        _run_once(job, on_progress, should_cancel)
+    except ToolError as exc:
+        if job.fallback_preset is None:
+            raise
+        from .jobs import cleanup
+        cleanup(job)
+        job.preset, job.fallback_preset = job.fallback_preset, None
+        job.note = ("the graphics card could not encode this file, so the "
+                    "processor was used")
+        job.gpu_error = exc.detail
+        _run_once(job, on_progress, should_cancel)
+
+
+def _run_once(job: Job, on_progress: ProgressFn,
+              should_cancel: Callable[[], bool]) -> None:
     job.prepare()
     if job.preset.tool == "ffmpeg":
         run_ffmpeg(job, on_progress, should_cancel)
+    elif (job.preset.ext == "webp" and job.src.suffix.lower() == ".gif"
+          and "libwebp_anim" in ffmpeg_encoders() and is_animated(job.src)):
+        run_animated_webp(job, on_progress, should_cancel)
     else:
         run_magick(job, on_progress, should_cancel)

@@ -22,7 +22,7 @@ Icon=security-high
 Exec=dolphin-easy-convert --preset jpeg-clean %F
 
 [Desktop Action webp]
-Name=WebP
+Name=WebP (keeps GIF animation)
 Icon=image-x-generic
 Exec=dolphin-easy-convert --preset webp-img %F
 

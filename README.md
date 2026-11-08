@@ -24,6 +24,22 @@ No attempt is made to support other distributions.
 - **Keeps what matters.** Every audio track in a video, album art in MP3,
   M4A and FLAC, tags, and the original file dates. Phone photos are turned
   upright.
+- **Video → animated WebP or GIF, with a preview.** Pick the part of the
+  video, the size, smoothness and quality, press *Preview*, and a few seconds
+  play back next to your previous attempt, each with the size the whole clip
+  would come out at. *Use previous settings* goes back if you preferred it.
+- **Animated GIF → WebP keeps the animation**, every frame and its timing.
+- **One window.** Clicking *Convert To* again while something is converting
+  adds the new files to that window's queue ("Then: MP3 …") instead of
+  starting a second conversion that fights the first for the processor.
+- **Progress in Plasma's notification area**, like Dolphin's file copies,
+  with Cancel and Open folder — handy when the window is minimised.
+- **Graphics-card encoding (optional).** For MP4 (H.264) and MKV (H.265), a
+  checkbox appears when your GPU and driver can really do it (tested with a
+  tiny encode first). Much faster, files a little larger. If the card fails
+  on a file, that file is redone on the processor automatically. On Fedora,
+  H.264/H.265 on the GPU needs RPM Fusion's `mesa-va-drivers-freeworld`
+  (AMD) or `intel-media-driver` (Intel).
 - **You choose where files go** — every time, or tick *start straight away*
   to skip the question for menu formats (*Custom…* always asks, and is where
   you turn that off again).
@@ -118,8 +134,12 @@ don't either:
   requests. The tools are run from `/usr/bin`, not whatever is first on your
   `$PATH`, and the launcher starts Python in isolated mode so no
   user-installed module can be loaded in place of the real ones.
-- The only other contact is your own desktop session over local D-Bus: a
-  "finished" notification and asking Dolphin to show the new files.
+- The only other contact is your own desktop session, all local: D-Bus for
+  the "finished" notification, Plasma's progress entry and asking Dolphin to
+  show the new files; and a Unix socket in `$XDG_RUNTIME_DIR` (`/run/user/…`,
+  readable only by you) through which a second click hands its files to the
+  running window. Animated-image previews are written to a private temporary
+  folder that is deleted when the window closes.
 
 `dolphin-easy-convert --check` confirms the protections are in place.
 
@@ -188,6 +208,9 @@ src/dolphin_easy_convert/
   runner.py    subprocess execution + progress parsing
   ui.py        the PyQt6 window
   main.py      CLI entry point used by the menu files
+  animate.py   video -> animated WebP/GIF options and previews
+  desktop.py   notification, Show in folder, Plasma progress (local D-Bus)
+  instance.py  one window: later clicks join the running queue
   magick/      extra ImageMagick security policy (local only)
 servicemenus/  three .desktop files (video, audio, image)
 packaging/     RPM spec, AppStream metainfo, /usr/bin launcher, hidden .desktop

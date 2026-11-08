@@ -7,9 +7,12 @@ same thing can tick "start straight away" and skip the options page for
 menu formats; Custom… always shows it, which is also where that setting is
 turned back off.
 
+While it converts, the window also takes requests from later "Convert To"
+clicks (see instance.py) and adds them to its queue, so conversions run one
+after another in one place instead of fighting over the processor.
+
 Nothing here talks to the network. The only outside contact is the local
-session D-Bus (a desktop notification, and asking the file manager to show
-the results), both optional and silently skipped if unavailable.
+session D-Bus (see desktop.py), all optional.
 """
 
 from __future__ import annotations
@@ -18,8 +21,8 @@ import dataclasses
 import time
 from pathlib import Path
 
-from PyQt6.QtCore import QSettings, Qt, QThread, QTimer, QUrl, pyqtSignal
-from PyQt6.QtGui import QDesktopServices, QIcon
+from PyQt6.QtCore import QSettings, Qt, QThread, QTimer, pyqtSignal
+from PyQt6.QtGui import QFont, QIcon
 from PyQt6.QtWidgets import (
     QAbstractItemView, QApplication, QButtonGroup, QCheckBox, QComboBox,
     QDialog, QDialogButtonBox, QFormLayout, QGroupBox, QHBoxLayout,
@@ -28,10 +31,13 @@ from PyQt6.QtWidgets import (
     QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget,
 )
 
+from . import desktop, instance
 from . import jobs as jobs_mod
 from . import runner
-from .jobs import Job, MODE_LABELS, OutputMode
-from .presets import Media, Preset, presets_for
+from .jobs import Job, MODE_LABELS, OutputMode, media_of
+from .presets import (
+    PRESETS_BY_ID, Media, Preset, gpu_encoder_name, gpu_variant, presets_for,
+)
 
 ORG = "dolphin-easy-convert"
 
@@ -83,16 +89,21 @@ def human_eta(seconds: float) -> str:
 # --------------------------------------------------------------------------
 
 class ConvertWorker(QThread):
-    """Runs the planned jobs one after another on a background thread."""
+    """Runs queued jobs one after another on a background thread.
+
+    Reads the shared job list by index, so jobs appended while it runs (a
+    later click joining the queue) are picked up without a restart.
+    """
 
     file_started = pyqtSignal(int)
     file_progress = pyqtSignal(float)                # -1.0 = indeterminate
     file_finished = pyqtSignal(int, str, str, str)   # index, status, text, detail
-    finished_all = pyqtSignal(int, int, int)         # done, failed, skipped
+    queue_empty = pyqtSignal()
 
-    def __init__(self, job_list: list[Job]) -> None:
+    def __init__(self, job_list: list[Job], start: int = 0) -> None:
         super().__init__()
         self._jobs = job_list
+        self._next = start
         self._cancel = False
         self._skip = False
 
@@ -103,15 +114,14 @@ class ConvertWorker(QThread):
         self._skip = True
 
     def run(self) -> None:  # noqa: D102 - Qt entry point
-        done = failed = 0
-        skipped = sum(1 for j in self._jobs if j.status == "skipped")
-
-        for index, job in enumerate(self._jobs):
-            if job.status == "skipped":
+        while self._next < len(self._jobs):
+            index = self._next
+            self._next += 1
+            job = self._jobs[index]
+            if job.status != "pending":
                 continue
             if self._cancel:
                 job.status, job.message = "skipped", "cancelled"
-                skipped += 1
                 self.file_finished.emit(index, "skipped", "cancelled", "")
                 continue
 
@@ -129,26 +139,24 @@ class ConvertWorker(QThread):
                 )
                 warning = jobs_mod.finalise(job)
                 job.status = "done"
-                done += 1
                 text = size_change(job.src_size, job.dest.stat().st_size)
-                if warning:
-                    text += f" — {warning}"
+                for extra in (job.note, warning):
+                    if extra:
+                        text += f" — {extra}"
                 self.file_finished.emit(index, "done", text, str(job.dest))
             except runner.Cancelled:
                 jobs_mod.cleanup(job)
                 job.status = "skipped"
                 job.message = "skipped" if not self._cancel else "cancelled"
-                skipped += 1
                 self.file_finished.emit(index, "skipped", job.message, "")
             except Exception as exc:  # noqa: BLE001 - surfaced in the UI
                 jobs_mod.cleanup(job)
                 job.status = "failed"
                 job.message = getattr(exc, "summary", str(exc))
-                failed += 1
                 self.file_finished.emit(index, "failed", job.message,
                                         getattr(exc, "detail", str(exc)))
 
-        self.finished_all.emit(done, failed, skipped)
+        self.queue_empty.emit()
 
 
 # --------------------------------------------------------------------------
@@ -194,8 +202,6 @@ def quality_for_level(preset: Preset, level: str) -> int | None:
         return None
     opt, d = knob
     lo, hi = rng
-    lower_is_better = opt == "-crf" or (opt == "-q:a"
-                                        and "libmp3lame" in preset.needs)
     if opt == "-crf":
         table = {"Smaller file": d + 6, "Higher quality": d - 4,
                  "Best quality": d - 8}
@@ -205,10 +211,10 @@ def quality_for_level(preset: Preset, level: str) -> int | None:
     elif opt == "-b:a":
         table = {"Smaller file": d - 64, "Higher quality": d + 64,
                  "Best quality": 320}
-    elif lower_is_better:  # MP3 -q:a
+    elif "libmp3lame" in preset.needs:  # MP3 -q:a, lower is better
         table = {"Smaller file": d + 3, "Higher quality": d - 1,
                  "Best quality": lo}
-    else:  # Vorbis -q:a
+    else:  # Vorbis -q:a, higher is better
         table = {"Smaller file": d - 2, "Higher quality": d + 2,
                  "Best quality": hi}
     value = table.get(level)
@@ -248,62 +254,6 @@ def apply_overrides(preset: Preset, quality: int | None,
 
 
 # --------------------------------------------------------------------------
-# desktop integration (local D-Bus only, all optional)
-# --------------------------------------------------------------------------
-
-def notify(summary: str, body: str, icon: str) -> None:
-    """Show a desktop notification via org.freedesktop.Notifications."""
-    try:
-        from PyQt6.QtCore import QMetaType
-        from PyQt6.QtDBus import (
-            QDBus, QDBusArgument, QDBusConnection, QDBusMessage,
-        )
-    except ImportError:
-        return
-    bus = QDBusConnection.sessionBus()
-    if not bus.isConnected():
-        return
-    msg = QDBusMessage.createMethodCall(
-        "org.freedesktop.Notifications", "/org/freedesktop/Notifications",
-        "org.freedesktop.Notifications", "Notify")
-    replaces = QDBusArgument()
-    replaces.add(0, QMetaType.Type.UInt.value)
-    actions = QDBusArgument()
-    actions.add([], QMetaType.Type.QStringList.value)
-    msg.setArguments(["Easy Convert", replaces, icon, summary, body,
-                      actions, {}, -1])
-    bus.call(msg, QDBus.CallMode.NoBlock)
-
-
-def show_in_file_manager(paths: list[Path]) -> None:
-    """Open the file manager with the new files selected.
-
-    Uses org.freedesktop.FileManager1.ShowItems (Dolphin implements it);
-    falls back to simply opening the folder.
-    """
-    if not paths:
-        return
-    try:
-        from PyQt6.QtCore import QMetaType
-        from PyQt6.QtDBus import QDBusArgument, QDBusConnection, QDBusMessage
-        bus = QDBusConnection.sessionBus()
-        if bus.isConnected():
-            msg = QDBusMessage.createMethodCall(
-                "org.freedesktop.FileManager1", "/org/freedesktop/FileManager1",
-                "org.freedesktop.FileManager1", "ShowItems")
-            uris = QDBusArgument()
-            uris.add([QUrl.fromLocalFile(str(p)).toString() for p in paths],
-                     QMetaType.Type.QStringList.value)
-            msg.setArguments([uris, ""])
-            reply = bus.call(msg)
-            if reply.type() != QDBusMessage.MessageType.ErrorMessage:
-                return
-    except ImportError:
-        pass
-    QDesktopServices.openUrl(QUrl.fromLocalFile(str(paths[0].parent)))
-
-
-# --------------------------------------------------------------------------
 # dialog
 # --------------------------------------------------------------------------
 
@@ -318,23 +268,31 @@ STATUS_ICONS = {
 
 class ConvertDialog(QDialog):
     def __init__(self, paths: list[Path], preset: Preset | None,
-                 media: Media, custom: bool) -> None:
-        super().__init__()
+                 media: Media, custom: bool, animate: str | None = None,
+                 queue_into: "ConvertDialog | None" = None) -> None:
+        super().__init__(queue_into)
         self._paths = paths
         self._media = media
-        self._custom = custom or preset is None
+        self._animate = animate if media is Media.VIDEO else None
+        self._custom = (custom or preset is None) and not self._animate
         self._preset = preset
+        self._queue_into = queue_into
         self._worker: ConvertWorker | None = None
         self._jobs: list[Job] = []
+        self._rows: list[QTreeWidgetItem | None] = []
         self._close_when_done = False
         self._auto_started = False
         self._outputs: list[Path] = []
-        self._bytes_before = self._bytes_after = 0
+        self._plasma: desktop.PlasmaJob | None = None
+        self._receiver: instance.Receiver | None = None
         self._settings = QSettings(ORG, ORG)
+        self._anim_box = None
+        self._run_first = 0
+        self._started_at = time.monotonic()
 
-        self.setWindowTitle("Convert")
-        self.setWindowIcon(QIcon.fromTheme(WINDOW_ICONS[media],
-                                           QIcon.fromTheme("applications-multimedia")))
+        self.setWindowTitle("Convert" if not queue_into else "Add to queue")
+        self.setWindowIcon(QIcon.fromTheme(
+            WINDOW_ICONS[media], QIcon.fromTheme("applications-multimedia")))
         self.setMinimumWidth(560)
 
         self._stack = QStackedWidget(self)
@@ -347,7 +305,7 @@ class ConvertDialog(QDialog):
 
     def start_immediately(self) -> bool:
         """True when the options page should be skipped for this run."""
-        return (not self._custom
+        return (not self._custom and not self._animate
                 and self._settings.value("start_immediately", False, type=bool))
 
     # ---- page 1: options ------------------------------------------------
@@ -358,18 +316,30 @@ class ConvertDialog(QDialog):
 
         count = len(self._paths)
         noun = "file" if count == 1 else "files"
-        if self._custom:
-            layout.addWidget(QLabel(f"<b>Convert {count} {noun}</b>"))
+        title = QLabel()
+        title.setTextFormat(Qt.TextFormat.PlainText)
+        font = title.font()
+        font.setBold(True)
+        title.setFont(font)
+        layout.addWidget(title)
+        if self._animate:
+            from .animate import AnimateBox
+            title.setText(f"Turn {count} video{'s' if count > 1 else ''} into "
+                          "an animated image")
+            self._anim_box = AnimateBox(self._paths, self._animate)
+            self._anim_box.changed.connect(self._update_preview)
+            layout.addWidget(self._anim_box)
+        elif self._custom:
+            title.setText(f"Convert {count} {noun}")
             layout.addWidget(self._build_format_box())
         else:
             assert self._preset is not None
-            title = QLabel()
-            title.setTextFormat(Qt.TextFormat.PlainText)
             title.setText(f"Convert {count} {noun} to {self._preset.label}")
-            font = title.font()
-            font.setBold(True)
-            title.setFont(font)
-            layout.addWidget(title)
+
+        self._gpu = QCheckBox("Use the graphics card — much faster, files "
+                              "a little larger")
+        self._gpu.setChecked(self._settings.value("use_gpu", False, type=bool))
+        layout.addWidget(self._gpu)
 
         layout.addWidget(self._build_placement_box())
 
@@ -391,7 +361,8 @@ class ConvertDialog(QDialog):
 
         buttons = QDialogButtonBox()
         self._start_btn = buttons.addButton(
-            "Convert", QDialogButtonBox.ButtonRole.AcceptRole)
+            "Add to queue" if self._queue_into else "Convert",
+            QDialogButtonBox.ButtonRole.AcceptRole)
         self._start_btn.setDefault(True)
         buttons.addButton(QDialogButtonBox.StandardButton.Cancel)
         buttons.accepted.connect(self._start)
@@ -509,6 +480,8 @@ class ConvertDialog(QDialog):
         return OutputMode(button.property("mode"))
 
     def _current_preset(self) -> Preset | None:
+        if self._anim_box is not None:
+            return self._anim_box.preset()
         if self._custom:
             return self._format_combo.currentData()
         return self._preset
@@ -518,6 +491,8 @@ class ConvertDialog(QDialog):
         if not hasattr(self, "_preview"):
             return
         preset = self._current_preset()
+        self._gpu.setVisible(preset is not None
+                             and gpu_encoder_name(preset) is not None)
         if preset is None:
             self._preview.setText("")
             return
@@ -536,6 +511,9 @@ class ConvertDialog(QDialog):
                 lines.append(f"  • {job.src.name} — {job.message}")
             if len(skipped) > 3:
                 lines.append(f"  • …and {len(skipped) - 3} more")
+        if self._queue_into is not None:
+            lines.append("They will be converted after the files already "
+                         "in the queue.")
         self._preview.setText("\n".join(lines))
         self._start_btn.setEnabled(n > 0)
 
@@ -587,7 +565,7 @@ class ConvertDialog(QDialog):
         self._show_btn = QPushButton("Show in folder")
         self._show_btn.setIcon(QIcon.fromTheme("folder-open"))
         self._show_btn.clicked.connect(
-            lambda: show_in_file_manager(self._outputs))
+            lambda: desktop.show_in_file_manager(self._outputs))
         self._show_btn.setVisible(False)
         row.addWidget(self._show_btn)
         self._close_btn = QPushButton("Close")
@@ -605,15 +583,16 @@ class ConvertDialog(QDialog):
     def _icon(self, status: str) -> QIcon:
         return self.style().standardIcon(STATUS_ICONS[status])
 
-    # ---- running --------------------------------------------------------
+    # ---- planning --------------------------------------------------------
 
-    def _start(self) -> None:
+    def _plan(self) -> tuple[list[Job], Preset] | None:
+        """Turn the options into jobs (shared by Convert and Add to queue)."""
         preset = self._current_preset()
         if preset is None:
             QMessageBox.warning(self, "Nothing to do",
                                 "No encoder on this system can produce "
                                 "that format.")
-            return
+            return None
         if self._custom:
             width = self._max_width.currentData() or None
             if not self._max_width.isEnabled():
@@ -622,24 +601,78 @@ class ConvertDialog(QDialog):
                                      width)
 
         mode = self._selected_mode()
+        use_gpu = self._gpu.isChecked()
         if not self._auto_started:  # the person saw and used the options
             if self._remember.isChecked():
                 self._settings.setValue("output_mode", mode.value)
             self._settings.setValue("start_immediately",
                                     self._skip_next.isChecked())
+            if self._gpu.isVisible():
+                self._settings.setValue("use_gpu", use_gpu)
 
-        self._jobs = jobs_mod.plan(self._paths, preset, mode)
-        runnable = [j for j in self._jobs if j.status != "skipped"]
-        if not runnable:
+        software = preset
+        note = ""
+        if use_gpu and gpu_encoder_name(preset):
+            gpu = gpu_variant(preset)
+            if gpu is not None:
+                preset = gpu
+            else:
+                note = ("The graphics card can't encode this format on this "
+                        "system (driver), so the processor is used.")
+
+        jobs = jobs_mod.plan(self._paths, preset, mode)
+        for job in jobs:
+            if preset is not software:
+                job.fallback_preset = software
+        if not any(j.status != "skipped" for j in jobs):
             QMessageBox.information(
                 self, "Nothing to convert",
                 "None of the selected files can be converted to "
                 f"{preset.label}.")
-            self.reject()
+            return None
+        if note:
+            self._log.appendPlainText(note)
+        return jobs, preset
+
+    # ---- running --------------------------------------------------------
+
+    def _start(self) -> None:
+        planned = self._plan()
+        if planned is None:
+            if self._queue_into is None:
+                self.reject()
+            return
+        jobs, preset = planned
+        if self._queue_into is not None:
+            self._queue_into.add_jobs(jobs, preset.label)
+            self.accept()
             return
 
-        self._list.clear()
-        for job in self._jobs:
+        self.setWindowTitle(f"Converting to {preset.label}")
+        self._stack.setCurrentIndex(1)
+        self._started_at = time.monotonic()
+        self._plasma = desktop.PlasmaJob(WINDOW_ICONS[self._media])
+        self._plasma.cancel_requested.connect(self._cancel)
+        self._plasma.set_title(f"Converting to {preset.label}")
+        self._eta_timer = QTimer(self)
+        self._eta_timer.timeout.connect(self._update_overall)
+        self._eta_timer.start(1000)
+        self.add_jobs(jobs, preset.label, header=False)
+
+        # From now on, later "Convert To" clicks join this window's queue.
+        self._receiver = instance.Receiver(self.enqueue)
+        self._receiver.listen()
+
+    def add_jobs(self, jobs: list[Job], label: str, header: bool = True) -> None:
+        """Append jobs to the queue (and restart the worker if it is idle)."""
+        if header:
+            item = QTreeWidgetItem([f"Then: {label}", ""])
+            font = QFont(item.font(0))
+            font.setBold(True)
+            item.setFont(0, font)
+            self._list.addTopLevelItem(item)
+        first = len(self._jobs)
+        for job in jobs:
             item = QTreeWidgetItem([job.src.name,
                                     job.message if job.status == "skipped"
                                     else "waiting"])
@@ -647,39 +680,82 @@ class ConvertDialog(QDialog):
                                        else "pending"))
             item.setToolTip(0, str(job.src))
             self._list.addTopLevelItem(item)
+            self._jobs.append(job)
+            self._rows.append(item)
+        self._current_fraction = 0.0
 
-        self._total = len(runnable)
-        self._completed = 0
-        self._fraction = 0.0
-        self._started_at = time.monotonic()
-        self.setWindowTitle(f"Converting to {preset.label}")
-        self._stack.setCurrentIndex(1)
+        if self._worker is None or not self._worker.isRunning():
+            self._set_running_ui(True)
+            self._run_first = first
+            self._started_at = time.monotonic()
+            self._start_worker(first)
+        self._update_overall()
 
-        self._worker = ConvertWorker(self._jobs)
+    def _start_worker(self, first: int) -> None:
+        self._worker = ConvertWorker(self._jobs, start=first)
         self._worker.file_started.connect(self._on_file_started)
         self._worker.file_progress.connect(self._on_file_progress)
         self._worker.file_finished.connect(self._on_file_finished)
-        self._worker.finished_all.connect(self._on_all_finished)
+        self._worker.queue_empty.connect(self._on_queue_empty)
         self._worker.start()
 
-        self._eta_timer = QTimer(self)
-        self._eta_timer.timeout.connect(self._update_overall)
-        self._eta_timer.start(1000)
+    def enqueue(self, request: dict) -> None:
+        """A later click handed over its request (see instance.py)."""
+        files = request["files"]
+        kinds = [m for m in (media_of(f) for f in files) if m is not None]
+        if not kinds:
+            return
+        media = max(set(kinds), key=kinds.count)
+        preset = PRESETS_BY_ID.get(request["preset"]) if request["preset"] \
+            else None
+        dialog = ConvertDialog(files, preset, media, request["custom"],
+                               request["animate"], queue_into=self)
+        if dialog.start_immediately():
+            dialog._auto_started = True
+            dialog._start()
+            dialog.deleteLater()
+        else:
+            dialog.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+            dialog.show()
+            dialog.raise_()
+            dialog.activateWindow()
+
+    def _set_running_ui(self, running: bool) -> None:
+        self._skip_btn.setVisible(running)
+        self._cancel_btn.setVisible(running)
+        self._cancel_btn.setEnabled(running)
+        self._cancel_btn.setText("Stop all")
+        self._file_bar.setVisible(running)
+        self._close_btn.setVisible(not running)
+        self._show_btn.setVisible(not running and bool(self._outputs))
+        if running and self._plasma is not None and not self._plasma.active:
+            self._plasma = desktop.PlasmaJob(WINDOW_ICONS[self._media])
+            self._plasma.cancel_requested.connect(self._cancel)
+            self._plasma.set_title("Converting")
+
+    def _counts(self) -> dict[str, int]:
+        counts = {"pending": 0, "running": 0, "done": 0, "failed": 0,
+                  "skipped": 0}
+        for job in self._jobs:
+            counts[job.status] = counts.get(job.status, 0) + 1
+        return counts
 
     def _on_file_started(self, index: int) -> None:
-        self._fraction = 0.0
-        item = self._list.topLevelItem(index)
+        self._current_fraction = 0.0
+        item = self._rows[index]
         item.setIcon(0, self._icon("running"))
         item.setText(1, "converting…")
         self._list.scrollToItem(item)
         self._skip_btn.setEnabled(True)
+        if self._plasma:
+            self._plasma.set_current(self._jobs[index].src.name)
         self._update_overall()
 
     def _on_file_progress(self, fraction: float) -> None:
         if fraction < 0:
             self._file_bar.setRange(0, 0)  # indeterminate
         else:
-            self._fraction = fraction
+            self._current_fraction = fraction
             self._file_bar.setRange(0, 100)
             self._file_bar.setValue(int(fraction * 100))
             self._update_overall()
@@ -687,71 +763,94 @@ class ConvertDialog(QDialog):
     def _update_overall(self) -> None:
         if self._worker is None or not self._worker.isRunning():
             return
-        overall = min((self._completed + self._fraction) / self._total, 1.0)
+        run = self._jobs[self._run_first:]  # this run only, for a fair ETA
+        finished = sum(1 for j in run if j.status in ("done", "failed")
+                       or (j.status == "skipped"
+                           and j.message in ("skipped", "cancelled")))
+        total = finished + sum(1 for j in run
+                               if j.status in ("pending", "running"))
+        if total == 0:
+            return
+        overall = min((finished + self._current_fraction) / total, 1.0)
         self._overall_bar.setValue(int(overall * 1000))
-        text = f"Converting {min(self._completed + 1, self._total)} " \
-               f"of {self._total}"
+        text = f"Converting {min(finished + 1, total)} of {total}"
         elapsed = time.monotonic() - self._started_at
         if overall > 0.03 and elapsed > 5:
             text += " · " + human_eta(elapsed / overall * (1 - overall))
         self._overall_label.setText(text)
+        if self._plasma:
+            self._plasma.set_progress(finished, total, overall)
 
     def _on_file_finished(self, index: int, status: str, text: str,
                           detail: str) -> None:
         job = self._jobs[index]
-        item = self._list.topLevelItem(index)
+        item = self._rows[index]
         item.setIcon(0, self._icon(status))
         item.setText(1, text)
-        if status in ("done", "failed") or text == "skipped":
-            self._completed += 1
         if status == "done":
             dest = Path(detail)
             self._outputs.append(dest)
             item.setToolTip(1, str(dest))
             item.setText(0, f"{job.src.name}  →  {dest.name}")
-            self._bytes_before += job.src_size
-            try:
-                self._bytes_after += dest.stat().st_size
-            except OSError:
-                pass
             self._log.appendPlainText(f"ok       {job.src} → {dest}")
+            if job.gpu_error:
+                self._log.appendPlainText(
+                    f"         graphics card error: {job.gpu_error}")
+            if self._plasma:
+                self._plasma.set_destination(dest.parent)
         elif status == "failed":
             item.setToolTip(1, detail)
             self._log.appendPlainText(f"FAILED   {job.src}\n         {detail}")
-        self._fraction = 0.0
+        self._current_fraction = 0.0
         self._update_overall()
 
-    def _on_all_finished(self, done: int, failed: int, skipped: int) -> None:
-        self._eta_timer.stop()
+    def _on_queue_empty(self) -> None:
+        # A request may have been queued just as the worker ran out of work.
+        if any(j.status == "pending" for j in self._jobs):
+            self._worker.wait()
+            pending = next(i for i, j in enumerate(self._jobs)
+                           if j.status == "pending")
+            self._start_worker(pending)
+            return
+        self._worker.wait()
+        self._finish()
+
+    def _finish(self) -> None:
+        c = self._counts()
+        done, failed = c["done"], c["failed"]
+        skipped = c["skipped"]
         self._overall_bar.setValue(1000)
         self._file_bar.setRange(0, 100)
         self._file_bar.setValue(100)
-        self._file_bar.setVisible(False)
         parts = [f"{done} converted"]
         if failed:
             parts.append(f"{failed} failed")
         if skipped:
             parts.append(f"{skipped} skipped")
         summary = ", ".join(parts)
-        if done and self._bytes_before:
-            saved = self._bytes_before - self._bytes_after
-            if saved > 0:
-                summary += f" · saved {human_size(saved)} " \
-                           f"({round(saved * 100 / self._bytes_before)}%)"
+        before = sum(j.src_size for j in self._jobs if j.status == "done")
+        after = 0
+        for j in self._jobs:
+            if j.status == "done":
+                try:
+                    after += j.dest.stat().st_size
+                except OSError:
+                    pass
+        if before and after < before:
+            saved = before - after
+            summary += (f" · saved {human_size(saved)} "
+                        f"({round(saved * 100 / before)}%)")
         self._overall_label.setText(f"Finished — {summary}")
-        self._skip_btn.setVisible(False)
-        self._cancel_btn.setVisible(False)
-        self._show_btn.setVisible(bool(self._outputs))
-        self._close_btn.setVisible(True)
+        self._set_running_ui(False)
         self._close_btn.setDefault(True)
-        if failed and not self._log_btn.isChecked():
-            self._list.setFocus()
+        if self._plasma:
+            self._plasma.finish(f"{failed} failed" if failed else "")
 
         if not self.isActiveWindow():
             QApplication.alert(self)
-            notify("Conversion finished" if not failed
-                   else "Conversion finished with problems",
-                   summary, WINDOW_ICONS[self._media])
+            desktop.notify("Conversion finished" if not failed
+                           else "Conversion finished with problems",
+                           summary, WINDOW_ICONS[self._media])
         if self._close_when_done:
             self.accept()
 
@@ -761,7 +860,7 @@ class ConvertDialog(QDialog):
             self._worker.skip_current()
 
     def _cancel(self) -> None:
-        if self._worker is not None:
+        if self._running():
             self._cancel_btn.setEnabled(False)
             self._skip_btn.setEnabled(False)
             self._cancel_btn.setText("Stopping…")
@@ -788,13 +887,32 @@ class ConvertDialog(QDialog):
             return
         super().closeEvent(event)
 
+    def done(self, result: int) -> None:  # noqa: D102 - every way of closing
+        if self._receiver is not None:
+            self._receiver.close()
+            self._receiver = None
+        if self._anim_box is not None:
+            self._anim_box.cleanup()
+        if self._plasma is not None:
+            self._plasma.finish()
+        super().done(result)
+
 
 def launch(paths: list[Path], preset: Preset | None, media: Media,
-           custom: bool) -> int:
+           custom: bool, animate: str | None = None) -> int:
     app = QApplication([])
     app.setApplicationName("Easy Convert")
     app.setDesktopFileName("dolphin-easy-convert")
-    dialog = ConvertDialog(paths, preset, media, custom)
+    app.setQuitOnLastWindowClosed(False)
+
+    # Another window busy converting? Join its queue instead of competing.
+    request = instance.make_request(preset.id if preset else None, custom,
+                                    animate, paths)
+    if instance.hand_over(request):
+        return 0
+
+    dialog = ConvertDialog(paths, preset, media, custom, animate)
+    dialog.finished.connect(app.quit)
     dialog.show()
     if dialog.start_immediately():
         dialog._auto_started = True

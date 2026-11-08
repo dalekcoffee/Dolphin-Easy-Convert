@@ -137,6 +137,70 @@ class LocalOnlyTests(unittest.TestCase):
                 os.environ["PATH"] = old
 
 
+class AnimationTests(unittest.TestCase):
+    def setUp(self) -> None:
+        from dolphin_easy_convert.animate import AnimSettings
+        self.S = AnimSettings
+
+    def test_webp_and_gif_arguments(self) -> None:
+        webp = self.S("webp", 5, 3, 480, 15, 80, False, 256, "none").preset()
+        self.assertEqual(webp.ext, "webp")
+        self.assertIn("libwebp_anim", webp.args)
+        self.assertEqual(webp.input_args, ("-ss", "5.000", "-t", "3.000"))
+        gif = self.S("gif", 0, 0, 0, 10, 0, False, 64, "none").preset()
+        self.assertEqual(gif.input_args, ())
+        graph = gif.args[gif.args.index("-vf") + 1]
+        self.assertIn("max_colors=64", graph)
+        self.assertNotIn("scale", graph)  # original size
+
+    def test_progress_uses_trimmed_length(self) -> None:
+        self.assertEqual(runner._clip_length(("-ss", "5", "-t", "3"), 20.0), 3.0)
+        self.assertEqual(runner._clip_length(("-ss", "18",), 20.0), 2.0)
+        self.assertIsNone(runner._clip_length(("-ss", "30",), 20.0))
+
+
+class GpuTests(unittest.TestCase):
+    def test_gpu_variant_swaps_encoder_and_keeps_quality(self) -> None:
+        old = presets.RENDER_NODE, presets.gpu_works
+        presets.RENDER_NODE = Path("/dev/null")
+        presets.gpu_works = lambda _enc: True
+        try:
+            if "h264_vaapi" not in presets.ffmpeg_encoders():
+                self.skipTest("ffmpeg here has no h264_vaapi")
+            gpu = presets.gpu_variant(presets.PRESETS_BY_ID["mp4-h264"])
+        finally:
+            presets.RENDER_NODE, presets.gpu_works = old
+        self.assertIn("h264_vaapi", gpu.args)
+        self.assertNotIn("libx264", gpu.args)
+        self.assertEqual(gpu.args[gpu.args.index("-qp") + 1], "20")
+        self.assertIn("-vaapi_device", gpu.input_args)
+
+    def test_no_gpu_variant_for_other_scales(self) -> None:
+        self.assertIsNone(presets.gpu_encoder_name(
+            presets.PRESETS_BY_ID["mp4-av1"]))
+
+
+class InstanceTests(unittest.TestCase):
+    def test_requests_are_validated(self) -> None:
+        try:
+            from dolphin_easy_convert import instance
+        except ImportError:
+            self.skipTest("PyQt6 not installed")
+        with tempfile.NamedTemporaryFile(suffix=".mp4") as real:
+            good = instance.make_request("mp3", False, None, [Path(real.name)])
+            self.assertIsNotNone(instance.validate(json_line(good)))
+        for bad in ({**good, "preset": "rm -rf"}, {**good, "files": ["rel.mp4"]},
+                    {**good, "files": ["/nonexistent/x.mp4"]},
+                    {**good, "animate": "exe"}, {**good, "v": 99}):
+            self.assertIsNone(instance.validate(json_line(bad)), bad)
+        self.assertIsNone(instance.validate(b"\xff not json"))
+
+
+def json_line(obj) -> bytes:
+    import json
+    return json.dumps(obj).encode()
+
+
 class ErrorTests(unittest.TestCase):
     def test_common_errors_are_explained(self) -> None:
         self.assertIn("disk is full",

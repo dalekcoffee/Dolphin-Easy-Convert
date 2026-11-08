@@ -1,7 +1,7 @@
 %global appid io.github.dalekcoffee.DolphinEasyConvert
 
 Name:           dolphin-easy-convert
-Version:        0.2.0
+Version:        0.3.0
 Release:        1%{?dist}
 Summary:        Right-click media conversion for Dolphin using ffmpeg and ImageMagick
 
@@ -31,6 +31,8 @@ Recommends:     dolphin
 # ImageMagick's HEIC coder module, which also handles AVIF. Without it AVIF
 # input is decoded with ffmpeg and AVIF output is encoded with ffmpeg instead.
 Recommends:     ImageMagick-heic
+# Lets the animated WebP/GIF window play its WebP previews.
+Recommends:     qt6-qtimageformats
 
 %description
 Adds a "Convert To" submenu to Dolphin's right-click menu for audio, video and
@@ -99,6 +101,17 @@ appstream-util validate-relax --nonet \
 %{_metainfodir}/%{appid}.metainfo.xml
 
 %changelog
+* Sun Nov 08 2026 Dalek <dalekcoffee@users.noreply.github.com> - 0.3.0-1
+- Video to animated WebP or GIF with a preview window: choose the part of
+  the video, size, smoothness and quality, preview a few seconds next to
+  the previous attempt with an estimated final size, then convert
+- Animated GIF to WebP keeps every frame and its timing
+- Progress shown in Plasma's notification area, with Cancel and Open folder
+- One window: a "Convert To" click while a conversion runs joins its queue
+  (local socket in $XDG_RUNTIME_DIR) instead of opening a second window
+- Optional graphics-card (VAAPI) encoding for H.264/H.265, checked with a
+  real test encode, falling back to the processor if it fails
+
 * Sun Nov 08 2026 Dalek <dalekcoffee@users.noreply.github.com> - 0.2.0-1
 - New presets: MP4 (small, for sharing), MP4 (fast, no re-encode) and
   JPEG (remove location & camera info)

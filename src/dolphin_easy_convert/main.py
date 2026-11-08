@@ -4,6 +4,7 @@ The .desktop files call this as:
 
     dolphin-easy-convert --preset mp4-h264 %F
     dolphin-easy-convert --custom %F
+    dolphin-easy-convert --animate webp %F
 
 `%F` hands over every selected path in a single invocation (verified on
 Plasma 6.7.3), so one run of this program handles the whole batch and shows one
@@ -143,6 +144,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--preset", help="preset id, e.g. mp4-h264")
     parser.add_argument("--custom", action="store_true",
                         help="open the dialog with format options")
+    parser.add_argument("--animate", choices=("webp", "gif"),
+                        help="video to animated WebP/GIF with a preview")
     parser.add_argument("--check", action="store_true",
                         help="verify ffmpeg, ImageMagick, PyQt6 and KDE")
     parser.add_argument("--version", action="version", version=__version__)
@@ -183,7 +186,12 @@ def main(argv: list[str] | None = None) -> int:
         return _fail("PyQt6 is not installed — run:  "
                      "sudo dnf install python3-pyqt6")
 
-    return launch(paths, preset, media, args.custom)
+    if args.animate:
+        from .presets import ffmpeg_encoders
+        if args.animate == "webp" and "libwebp_anim" not in ffmpeg_encoders():
+            args.animate = "gif"  # the window explains WebP is unavailable
+
+    return launch(paths, preset, media, args.custom, args.animate)
 
 
 if __name__ == "__main__":

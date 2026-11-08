@@ -36,6 +36,7 @@ class Preset:
     args: tuple[str, ...] = ()  # options placed between input and output
     needs: tuple[str, ...] = ()  # ffmpeg encoder names that must be present
     keep_cover: bool = False  # carry embedded album art over (audio only)
+    input_args: tuple[str, ...] = ()  # ffmpeg options placed before "-i"
 
     @property
     def is_video_target(self) -> bool:
@@ -106,6 +107,13 @@ PRESETS: tuple[Preset, ...] = (
         (*_KEEP_AV, "-c", "copy", "-movflags", "+faststart"),
     ),
     Preset(
+        "webp-anim", "Animated WebP", (Media.VIDEO,), "webp", "ffmpeg",
+        ("-map", "0:V:0", "-vf", "fps=15,scale='min(480,iw)':-2:flags=lanczos",
+         "-c:v", "libwebp_anim", "-loop", "0", "-quality", "75",
+         "-compression_level", "4", "-an"),
+        needs=("libwebp_anim",),
+    ),
+    Preset(
         "gif", "Animated GIF", (Media.VIDEO,), "gif", "ffmpeg",
         ("-map", "0:V:0", "-vf", "fps=12,scale=480:-1:flags=lanczos,"
                 "split[a][b];[a]palettegen[p];[b][p]paletteuse",
@@ -152,7 +160,8 @@ PRESETS: tuple[Preset, ...] = (
            # -strip drops EXIF/XMP/IPTC (GPS position, camera, timestamps)
            # and comments; -auto-orient first so the photo stays upright.
            (*_UPRIGHT, "-strip", "-quality", "90")),
-    Preset("webp-img", "WebP", (Media.IMAGE,), "webp", "magick",
+    Preset("webp-img", "WebP (keeps GIF animation)", (Media.IMAGE,), "webp",
+           "magick",
            (*_UPRIGHT, "-quality", "85")),
     Preset("avif", "AVIF (smallest)", (Media.IMAGE,), "avif", "magick",
            (*_UPRIGHT, "-quality", "60")),
@@ -358,6 +367,89 @@ def avif_reader() -> str | None:
     if tool_path("ffmpeg") and tool_path("magick"):
         return "ffmpeg"  # decode support itself is only known by trying
     return None
+
+
+# --------------------------------------------------------------------------
+# hardware (VAAPI) encoding
+# --------------------------------------------------------------------------
+
+# Software encoder -> VAAPI encoder with the same CRF-like 0-51 QP scale.
+# AV1/VP9 VAAPI use different quality scales, so they are left out rather
+# than guessed at.
+GPU_ENCODERS = {"libx264": "h264_vaapi", "libx265": "hevc_vaapi"}
+RENDER_NODE = Path("/dev/dri/renderD128")
+
+
+def gpu_encoder_name(preset: Preset) -> str | None:
+    """The VAAPI encoder a preset could use, if ffmpeg lists it here."""
+    if preset.tool != "ffmpeg" or "-c:v" not in preset.args:
+        return None
+    soft = preset.args[preset.args.index("-c:v") + 1]
+    hard = GPU_ENCODERS.get(soft)
+    if hard and RENDER_NODE.exists() and hard in ffmpeg_encoders():
+        return hard
+    return None
+
+
+@functools.lru_cache(maxsize=None)
+def gpu_works(encoder: str) -> bool:
+    """Encode three tiny test frames to prove the driver really supports it.
+
+    ffmpeg lists VAAPI encoders whether or not the installed driver can do
+    them (Fedora's Mesa ships without H.264/HEVC; RPM Fusion's
+    mesa-va-drivers-freeworld or intel-media-driver add them), so listing
+    alone means nothing.
+    """
+    exe = tool_path("ffmpeg")
+    if not exe or not RENDER_NODE.exists():
+        return False
+    try:
+        res = subprocess.run(
+            [exe, "-v", "error", "-vaapi_device", str(RENDER_NODE),
+             "-f", "lavfi", "-i", "testsrc=duration=0.2:size=256x144:rate=15",
+             "-vf", "format=nv12,hwupload", "-c:v", encoder,
+             "-frames:v", "3", "-f", "null", "-"],
+            capture_output=True, timeout=15, check=False)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return res.returncode == 0
+
+
+def gpu_variant(preset: Preset) -> Preset | None:
+    """The same preset encoded on the graphics card, or None if unavailable.
+
+    Quality uses constant QP on the same 0-51 scale as CRF; files come out
+    somewhat larger than the software encoder's at the same number, in
+    exchange for much faster encoding.
+    """
+    encoder = gpu_encoder_name(preset)
+    if encoder is None or not gpu_works(encoder):
+        return None
+    args = list(preset.args)
+    quality = "23"
+    out: list[str] = []
+    i = 0
+    while i < len(args):
+        opt = args[i]
+        if opt == "-crf":
+            quality = args[i + 1]
+            i += 2
+            continue
+        if opt in ("-c:v", "-preset", "-pix_fmt", "-b:v"):
+            i += 2  # replaced below / not applicable to VAAPI
+            continue
+        out.append(opt)
+        i += 1
+    if "-vf" in out:
+        j = out.index("-vf") + 1
+        out[j] = f"{out[j]},format=nv12,hwupload"
+    else:
+        out += ["-vf", "format=nv12,hwupload"]
+    out += ["-c:v", encoder, "-rc_mode", "CQP", "-qp", quality]
+    return dataclasses.replace(
+        preset, id=f"{preset.id}+gpu", label=f"{preset.label} · graphics card",
+        args=tuple(out),
+        input_args=("-vaapi_device", str(RENDER_NODE), *preset.input_args))
 
 
 def is_available(preset: Preset) -> bool:

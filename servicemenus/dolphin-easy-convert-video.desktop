@@ -4,7 +4,7 @@ X-KDE-ServiceTypes=KonqPopupMenu/Plugin
 X-KDE-Submenu=Convert To
 Icon=applications-multimedia
 MimeType=video/mp4;video/x-matroska;video/webm;video/quicktime;video/x-msvideo;video/x-ms-wmv;video/x-flv;video/mpeg;video/mp2t;video/ogg;video/3gpp;video/x-ms-asf;video/x-m4v;
-Actions=mp4H264;mp4Share;mp4Copy;mkvH265;webmVp9;mp4Av1;gif;sepMp3;sepOgg;sepFlac;custom;
+Actions=mp4H264;mp4Share;mp4Copy;mkvH265;webmVp9;mp4Av1;animWebp;animGif;sepMp3;sepOgg;sepFlac;custom;
 
 [Desktop Action mp4H264]
 Name=MP4 (H.264)
@@ -36,10 +36,15 @@ Name=MP4 (AV1 / smallest)
 Icon=video-x-generic
 Exec=dolphin-easy-convert --preset mp4-av1 %F
 
-[Desktop Action gif]
-Name=Animated GIF
-Icon=image-gif
-Exec=dolphin-easy-convert --preset gif %F
+[Desktop Action animWebp]
+Name=Animated WebP… (preview quality)
+Icon=image-x-generic
+Exec=dolphin-easy-convert --animate webp %F
+
+[Desktop Action animGif]
+Name=Animated GIF… (preview quality)
+Icon=image-x-generic
+Exec=dolphin-easy-convert --animate gif %F
 
 [Desktop Action sepMp3]
 Name=Extract audio as MP3

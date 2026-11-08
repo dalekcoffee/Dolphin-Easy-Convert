@@ -83,6 +83,9 @@ class Job:
     move_original_to: Path | None = None  # set only in SUBDIR_ORIGINALS mode
     trash_original: bool = False  # set only in TRASH_ORIGINALS mode
     src_size: int = 0  # bytes, recorded at planning time for "space saved"
+    fallback_preset: Preset | None = None  # software preset if GPU fails
+    note: str = ""       # told to the user alongside the result
+    gpu_error: str = ""  # why the graphics card attempt failed, for details
 
     # filled in as the job runs
     status: str = "pending"  # pending | running | done | failed | skipped
