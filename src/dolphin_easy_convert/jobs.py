@@ -94,6 +94,16 @@ class Job:
             f".{self.dest.stem}.dec-part-{os.getpid()}{self.dest.suffix}"
         )
 
+    def scratch(self, tag: str, ext: str) -> Path:
+        """An intermediate file for a two-step conversion, beside temp_dest.
+
+        Hidden, named for this process, and removed by the runner whether the
+        conversion succeeds or not. Never the source or the destination.
+        """
+        return self.dest.with_name(
+            f".{self.dest.stem}.dec-part-{os.getpid()}-{tag}.{ext}"
+        )
+
 
 def _unique(path: Path) -> Path:
     """First non-existing name at or after `path`, by appending -1, -2, ..."""

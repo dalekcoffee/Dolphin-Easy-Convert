@@ -23,7 +23,8 @@ from pathlib import Path
 from . import __version__
 from .jobs import media_of
 from .presets import (
-    Media, PRESETS_BY_ID, ffmpeg_encoders, missing_requirements, tool_path,
+    Media, PRESETS_BY_ID, avif_backend, avif_ffmpeg_encoder, avif_reader,
+    ffmpeg_encoders, magick_formats, missing_requirements, tool_path,
 )
 
 REQUIRED_PACKAGES = {
@@ -76,6 +77,24 @@ def check(verbose: bool = True) -> int:
             if e in encoders
         )
         notes.append("encoders        : " + (", ".join(interesting) or "none"))
+
+    if tool_path("magick"):
+        reader, writer = avif_reader(), avif_backend()
+        notes.append("AVIF read       : " + {
+            "magick": "ImageMagick (libheif)",
+            "ffmpeg": "via ffmpeg (ImageMagick's libheif cannot decode AV1)",
+        }.get(reader, "unavailable"))
+        notes.append("AVIF write      : " + {
+            "magick": "ImageMagick (libheif)",
+            "ffmpeg": f"via ffmpeg {avif_ffmpeg_encoder()} (ImageMagick's "
+                      "libheif has no AV1 encoder; transparency is dropped)",
+        }.get(writer, "unavailable — the AVIF preset is hidden"))
+        if "AVIF" not in magick_formats() and magick_formats():
+            notes.append("                  ImageMagick has no HEIC/AVIF coder:"
+                         "  sudo dnf install ImageMagick-heic")
+        elif reader != "magick" or writer != "magick":
+            notes.append("                  libheif lacks an AV1 plugin; see"
+                         "  dnf list 'libheif*'")
 
     if verbose:
         print(f"Easy Convert {__version__}")

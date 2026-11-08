@@ -57,6 +57,15 @@ ffmpeg build cannot produce never appears in the menu.
 - **Audio** → MP3, FLAC, Opus, M4A (AAC), WAV
 - **Image** → PNG, JPEG, WebP, AVIF, TIFF, PDF
 
+Image presets are filtered the same way, against `magick -list format`.
+
+**AVIF** goes through ImageMagick's HEIC coder (`ImageMagick-heic`), which
+can only read or write AVIF when libheif has an AV1 decoder or encoder plugin.
+When it can't, Easy Convert falls back to ffmpeg: it decodes AVIF input with
+ffmpeg, and encodes AVIF output with `libsvtav1` or `libaom-av1`. The ffmpeg
+encode path drops transparency. `dolphin-easy-convert --check` shows which path
+is in use.
+
 **Custom…** opens the same window with a format dropdown, a quality control
 (CRF for video, quality for images, kbps for audio) and an optional
 scale-down cap.

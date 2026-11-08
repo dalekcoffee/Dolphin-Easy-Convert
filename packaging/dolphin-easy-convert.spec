@@ -1,7 +1,7 @@
 %global appid io.github.dalekcoffee.DolphinEasyConvert
 
 Name:           dolphin-easy-convert
-Version:        0.1.1
+Version:        0.1.2
 Release:        1%{?dist}
 Summary:        Right-click media conversion for Dolphin using ffmpeg and ImageMagick
 
@@ -27,6 +27,9 @@ Requires:       /usr/bin/magick
 # Service menus are read by Dolphin, but the directory belongs to KF6 and the
 # feature works with any KIO-based file manager that reads servicemenus.
 Recommends:     dolphin
+# ImageMagick's HEIC coder module, which also handles AVIF. Without it AVIF
+# input is decoded with ffmpeg and AVIF output is encoded with ffmpeg instead.
+Recommends:     ImageMagick-heic
 
 %description
 Adds a "Convert To" submenu to Dolphin's right-click menu for audio, video and
@@ -82,6 +85,16 @@ appstream-util validate-relax --nonet \
 %{_metainfodir}/%{appid}.metainfo.xml
 
 %changelog
+* Sun Nov 08 2026 Dalek <dalekcoffee@users.noreply.github.com> - 0.1.2-1
+- Fix AVIF conversions: probe ImageMagick for AVIF read/write support, which
+  depends on libheif's AV1 plugins, instead of assuming it
+- Encode AVIF with ffmpeg (libsvtav1 or libaom-av1) when ImageMagick cannot,
+  and decode AVIF/HEIC with ffmpeg when ImageMagick cannot read them
+- Treat an image conversion that exits 0 without writing output as a failure
+- Hide image presets whose format ImageMagick cannot write
+- Report AVIF read/write support in --check
+- Recommend ImageMagick-heic
+
 * Sun Aug 02 2026 Dalek <dalekcoffee@users.noreply.github.com> - 0.1.1-1
 - Keep the output extension on the scratch filename so ffmpeg can select a
   muxer; every ffmpeg preset failed to start without it

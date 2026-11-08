@@ -19,7 +19,10 @@ from collections.abc import Callable, Iterator
 from pathlib import Path
 
 from .jobs import Job
-from .presets import tool_path
+from .presets import (
+    FFMPEG_DECODE_FALLBACK, avif_backend, avif_ffmpeg_encoder, magick_can_read,
+    magick_format, tool_path,
+)
 
 # Reports fractional progress in [0.0, 1.0], or None when it cannot be known.
 ProgressFn = Callable[[float | None], None]
@@ -140,27 +143,157 @@ def _parse_magick_line(line: str, _total: float | None = None) -> float | None:
 
 def run_magick(job: Job, on_progress: ProgressFn,
                should_cancel: Callable[[], bool]) -> None:
-    """Convert one image with ImageMagick 7."""
+    """Convert one image with ImageMagick 7.
+
+    Up to three stages, each only when needed:
+
+      1. ffmpeg decodes an AVIF/HEIC source that magick's libheif cannot read.
+      2. magick converts (always).
+      3. ffmpeg encodes AVIF when magick's libheif has no AV1 encoder.
+
+    Intermediate files are hidden scratch files in the destination folder and
+    are always removed.
+    """
     exe = tool_path("magick")
     if not exe:
         raise RuntimeError("ImageMagick (magick) is not installed")
 
     job.temp_dest.parent.mkdir(parents=True, exist_ok=True)
 
-    # "[0]" takes the first frame, so a multi-page input yields one output
-    # file rather than magick silently writing foo-0.png, foo-1.png, ...
-    source = f"{job.src}[0]" if job.preset.ext != "pdf" else str(job.src)
+    decode_first = (job.src.suffix.lower() in FFMPEG_DECODE_FALLBACK
+                    and not magick_can_read(magick_format(job.src.suffix)))
+    encode_after = job.preset.ext == "avif" and avif_backend() == "ffmpeg"
+    if job.preset.ext == "avif" and avif_backend() is None:
+        raise RuntimeError("no tool on this system can write AVIF; "
+                           "run  dolphin-easy-convert --check")
 
-    cmd = [exe, source, "-monitor", *job.preset.args,
-           f"{job.preset.ext}:{job.temp_dest}"]
+    stages = 1 + decode_first + encode_after
+    done = 0
 
-    _stream(cmd, job, on_progress, should_cancel, parse=_parse_magick_line)
+    def stage_progress(fraction: float | None) -> None:
+        if fraction is None:
+            on_progress(None)
+        else:
+            on_progress((done + fraction) / stages)
+
+    scratch: list[Path] = []
+    try:
+        source = job.src
+        if decode_first:
+            decoded = job.scratch("decode", "png")
+            scratch.append(decoded)
+            _ffmpeg_decode_still(job, source, decoded, stage_progress,
+                                 should_cancel)
+            source = decoded
+            done += 1
+
+        args = list(job.preset.args)
+        quality = None
+        if encode_after:
+            # magick only decodes and resizes here; ffmpeg sets the quality.
+            if "-quality" in args:
+                i = args.index("-quality")
+                quality = int(args[i + 1])
+                del args[i:i + 2]
+            target, out_fmt = job.scratch("encode", "png"), "png"
+            scratch.append(target)
+        else:
+            target, out_fmt = job.temp_dest, job.preset.ext
+
+        # "[0]" takes the first frame, so a multi-page input yields one output
+        # file rather than magick silently writing foo-0.png, foo-1.png, ...
+        spec = f"{source}[0]" if job.preset.ext != "pdf" else str(source)
+        cmd = [exe, spec, "-monitor", *args, f"{out_fmt}:{target}"]
+        tail = _stream(cmd, job, stage_progress, should_cancel,
+                       parse=_parse_magick_line)
+        _require_output(target, tail, "ImageMagick")
+        done += 1
+
+        if encode_after:
+            _ffmpeg_encode_avif(job, target, quality, stage_progress,
+                                should_cancel)
+    finally:
+        for path in scratch:
+            try:
+                path.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+
+def _require_output(path: Path, tail: list[str], tool: str) -> None:
+    """Fail unless `path` exists and is non-empty.
+
+    ImageMagick can exit 0 after a "no encode delegate" warning without
+    writing anything, so the exit status alone does not prove success.
+    """
+    try:
+        if path.stat().st_size > 0:
+            return
+    except OSError:
+        pass
+    detail = " / ".join(t for t in tail[-4:] if "=" not in t)
+    raise RuntimeError(detail or f"{tool} exited without writing any output")
+
+
+def _ffmpeg_still_cmd(src: Path) -> list[str]:
+    exe = tool_path("ffmpeg")
+    if not exe:
+        raise RuntimeError("ffmpeg is not installed")
+    return [exe, "-hide_banner", "-nostdin", "-loglevel", "error",
+            "-nostats", "-progress", "pipe:1", "-i", str(src),
+            "-frames:v", "1"]
+
+
+def _ffmpeg_decode_still(job: Job, src: Path, dest: Path,
+                         on_progress: ProgressFn,
+                         should_cancel: Callable[[], bool]) -> None:
+    """Decode the first frame of `src` to a PNG with ffmpeg."""
+    cmd = [*_ffmpeg_still_cmd(src), "-update", "1", "-y", str(dest)]
+    try:
+        tail = _stream(cmd, job, on_progress, should_cancel,
+                       parse=lambda line: _parse_ffmpeg_line(line, None))
+    except RuntimeError as exc:
+        raise RuntimeError(f"could not decode {src.suffix} with ffmpeg "
+                           f"either: {exc}") from exc
+    _require_output(dest, tail, "ffmpeg")
+
+
+def _ffmpeg_encode_avif(job: Job, src: Path, quality: int | None,
+                        on_progress: ProgressFn,
+                        should_cancel: Callable[[], bool]) -> None:
+    """Encode a still AVIF with ffmpeg's AV1 encoder.
+
+    `quality` uses ImageMagick's 0-100 scale (higher is better) so the Custom
+    dialog behaves the same either way; it is mapped onto CRF 63-0.
+    """
+    encoder = avif_ffmpeg_encoder()
+    if encoder is None:
+        raise RuntimeError("ffmpeg has no AV1 encoder for AVIF")
+    q = 60 if quality is None else max(0, min(quality, 100))
+    crf = round((100 - q) * 63 / 100)
+
+    cmd = [*_ffmpeg_still_cmd(src),
+           # 4:2:0 needs even dimensions; pad by at most one pixel.
+           "-vf", "pad=ceil(iw/2)*2:ceil(ih/2)*2",
+           "-pix_fmt", "yuv420p", "-c:v", encoder, "-crf", str(crf)]
+    if encoder == "libaom-av1":
+        cmd += ["-still-picture", "1", "-cpu-used", "4"]
+    else:
+        cmd += ["-preset", "6"]
+    cmd += ["-f", "avif", "-y", str(job.temp_dest)]
+
+    tail = _stream(cmd, job, on_progress, should_cancel,
+                   parse=lambda line: _parse_ffmpeg_line(line, None))
+    _require_output(job.temp_dest, tail, "ffmpeg")
 
 
 def _stream(cmd: list[str], job: Job, on_progress: ProgressFn,
             should_cancel: Callable[[], bool],
-            parse: Callable[[str], float | None]) -> None:
+            parse: Callable[[str], float | None]) -> list[str]:
     """Run a command, feeding each output line to `parse` for a percentage.
+
+    Returns the last few output lines, so callers can explain a run that
+    exited 0 but did not do its job.
 
     stdout and stderr are merged because ffmpeg writes progress to stdout while
     ImageMagick writes it to stderr, and both write errors to stderr.
@@ -202,6 +335,7 @@ def _stream(cmd: list[str], job: Job, on_progress: ProgressFn,
         detail = " / ".join(t for t in tail[-4:] if "=" not in t) or \
                  f"exit status {proc.returncode}"
         raise RuntimeError(detail)
+    return tail
 
 
 def _lines(stream) -> Iterator[str]:
