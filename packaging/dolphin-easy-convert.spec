@@ -77,8 +77,7 @@ install -D -p -m 0644 packaging/%{name}.desktop \
     %{buildroot}%{_datadir}/applications/%{name}.desktop
 
 install -D -p -m 0644 packaging/%{appid}.metainfo.xml \
-    %{buildroot}%{_datadir}/applications/%{name}.desktop
-%{_metainfodir}/%{appid}.metainfo.xml
+    %{buildroot}%{_metainfodir}/%{appid}.metainfo.xml
 
 install -D -p -m 0644 LICENSE \
     %{buildroot}%{_licensedir}/%{name}/LICENSE
@@ -98,6 +97,7 @@ appstream-util validate-relax --nonet \
 %{_datadir}/kio/servicemenus/dolphin-easy-convert-video.desktop
 %{_datadir}/kio/servicemenus/dolphin-easy-convert-audio.desktop
 %{_datadir}/kio/servicemenus/dolphin-easy-convert-image.desktop
+%{_datadir}/applications/%{name}.desktop
 %{_metainfodir}/%{appid}.metainfo.xml
 
 %changelog

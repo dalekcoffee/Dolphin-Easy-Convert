@@ -9,4 +9,4 @@ Icon=applications-multimedia
 Exec=dolphin-easy-convert --custom %F
 NoDisplay=true
 Terminal=false
-Categories=AudioVideo;Graphics;
+Categories=Utility;

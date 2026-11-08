@@ -22,6 +22,10 @@
 # Nothing is downloaded or installed from anywhere else.
 
 set -euo pipefail
+
+# Everything lives in main(), called on the last line, so bash has read the
+# whole script before step 3 can replace this very file with a newer one.
+main() {
 cd "$(dirname "$0")"
 
 NAME=dolphin-easy-convert
@@ -107,9 +111,13 @@ python3 -m unittest discover -s tests -q \
 
 # 6. build ------------------------------------------------------------------
 say "Building the package"
-./build-rpm.sh >/dev/null \
-  || fail "the build failed (run ./build-rpm.sh to see why). Nothing was
-         installed."
+build_log=$(mktemp)
+if ! ./build-rpm.sh >"$build_log" 2>&1; then
+  echo "Last lines of the build log ($build_log):"
+  tail -n 25 "$build_log"
+  fail "the build failed (above). Nothing was installed."
+fi
+rm -f "$build_log"
 shopt -s nullglob
 rpms=(dist/"${NAME}-${VERSION}"-*.noarch.rpm)
 (( ${#rpms[@]} == 1 )) || fail "expected one built RPM in dist/, found ${#rpms[@]}."
@@ -139,3 +147,7 @@ Done. Close every Dolphin window and reopen it to see new menu entries.
 A conversion window that was already open keeps the old version until it
 is closed.
 EOF
+}
+
+main "$@"
+exit
