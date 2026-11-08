@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import argparse
 import os
-import shutil
 import subprocess
 import sys
 from collections import Counter
@@ -37,7 +36,7 @@ REQUIRED_PACKAGES = {
 def _fail(message: str) -> int:
     """Report a startup problem, graphically when a desktop is present."""
     print(f"dolphin-easy-convert: {message}", file=sys.stderr)
-    kdialog = shutil.which("kdialog")
+    kdialog = tool_path("kdialog")
     if kdialog and os.environ.get("DISPLAY", os.environ.get("WAYLAND_DISPLAY")):
         subprocess.run([kdialog, "--title", "Easy Convert",
                         "--error", message], check=False)
@@ -95,6 +94,15 @@ def check(verbose: bool = True) -> int:
         elif reader != "magick" or writer != "magick":
             notes.append("                  libheif lacks an AV1 plugin; see"
                          "  dnf list 'libheif*'")
+
+    from .runner import MAGICK_POLICY_DIR
+    policy = MAGICK_POLICY_DIR / "policy.xml"
+    if policy.is_file():
+        notes.append("local only      : yes — ffmpeg limited to local files; "
+                     "ImageMagick network/script coders blocked")
+    else:
+        problems.append(f"ImageMagick safety policy missing: {policy} "
+                        "(reinstall the package)")
 
     if verbose:
         print(f"Easy Convert {__version__}")

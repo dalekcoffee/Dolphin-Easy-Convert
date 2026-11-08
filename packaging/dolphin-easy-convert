@@ -1,5 +1,11 @@
-#!/usr/bin/python3
-"""Launcher installed as /usr/bin/dolphin-easy-convert."""
+#!/usr/bin/python3 -I
+"""Launcher installed as /usr/bin/dolphin-easy-convert.
+
+-I (isolated mode) ignores PYTHONPATH and other PYTHON* variables, the
+user's ~/.local site-packages and the current directory, so only the system
+Python, the system python3-pyqt6 and this package's own code are ever
+imported -- never a same-named module someone pip-installed or dropped in.
+"""
 
 import sys
 

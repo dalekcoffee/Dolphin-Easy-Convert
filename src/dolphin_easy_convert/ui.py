@@ -1,30 +1,81 @@
 """The one window: choose how files are organised, then watch them convert.
 
-Deliberately a single dialog rather than two. You asked to be asked every time
-where the files should go, and a separate options popup followed by a separate
-progress popup would mean two windows per conversion. Instead the dialog starts
-on the options page and becomes the progress view when you press Convert.
+Deliberately a single dialog rather than two. The dialog starts on the
+options page and becomes the progress view when you press Convert, so a
+conversion never opens more than one window. People who always choose the
+same thing can tick "start straight away" and skip the options page for
+menu formats; Custom… always shows it, which is also where that setting is
+turned back off.
+
+Nothing here talks to the network. The only outside contact is the local
+session D-Bus (a desktop notification, and asking the file manager to show
+the results), both optional and silently skipped if unavailable.
 """
 
 from __future__ import annotations
 
 import dataclasses
+import time
 from pathlib import Path
 
-from PyQt6.QtCore import QSettings, Qt, QThread, pyqtSignal
+from PyQt6.QtCore import QSettings, Qt, QThread, QTimer, QUrl, pyqtSignal
+from PyQt6.QtGui import QDesktopServices, QIcon
 from PyQt6.QtWidgets import (
-    QApplication, QButtonGroup, QCheckBox, QComboBox, QDialog,
-    QDialogButtonBox, QFormLayout, QGroupBox, QHBoxLayout, QLabel, QMessageBox,
-    QPlainTextEdit, QProgressBar, QPushButton, QRadioButton, QSizePolicy,
-    QSpinBox, QStackedWidget, QVBoxLayout, QWidget,
+    QAbstractItemView, QApplication, QButtonGroup, QCheckBox, QComboBox,
+    QDialog, QDialogButtonBox, QFormLayout, QGroupBox, QHBoxLayout,
+    QHeaderView, QLabel, QMessageBox, QPlainTextEdit, QProgressBar,
+    QPushButton, QRadioButton, QSpinBox, QStackedWidget, QStyle,
+    QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget,
 )
 
 from . import jobs as jobs_mod
 from . import runner
-from .jobs import Job, OutputMode, MODE_LABELS
+from .jobs import Job, MODE_LABELS, OutputMode
 from .presets import Media, Preset, presets_for
 
 ORG = "dolphin-easy-convert"
+
+WINDOW_ICONS = {
+    Media.VIDEO: "video-x-generic",
+    Media.AUDIO: "audio-x-generic",
+    Media.IMAGE: "image-x-generic",
+}
+
+WHERE = {
+    OutputMode.SUBDIR_CONVERTED:
+        'into a "converted" folder next to the originals',
+    OutputMode.SUBDIR_ORIGINALS:
+        'next to the originals; the originals move into an "originals" folder',
+    OutputMode.TRASH_ORIGINALS:
+        "in place of the originals; the old files go to the Trash",
+    OutputMode.INPLACE_SUFFIX:
+        'next to the originals, with "-conv" added to the new names',
+}
+
+
+def human_size(n: float) -> str:
+    for unit in ("B", "KB", "MB", "GB"):
+        if abs(n) < 1024 or unit == "GB":
+            return f"{n:.0f} {unit}" if unit == "B" else f"{n:.1f} {unit}"
+        n /= 1024
+    return f"{n:.1f} TB"
+
+
+def size_change(before: int, after: int) -> str:
+    if before <= 0:
+        return human_size(after)
+    pct = round((after - before) * 100 / before)
+    sign = "+" if pct > 0 else "−" if pct < 0 else "±"
+    return f"{human_size(before)} → {human_size(after)} ({sign}{abs(pct)}%)"
+
+
+def human_eta(seconds: float) -> str:
+    if seconds < 60:
+        return "less than a minute left"
+    minutes = round(seconds / 60)
+    if minutes < 60:
+        return f"about {minutes} min left"
+    return f"about {minutes // 60} h {minutes % 60:02d} min left"
 
 
 # --------------------------------------------------------------------------
@@ -34,18 +85,22 @@ ORG = "dolphin-easy-convert"
 class ConvertWorker(QThread):
     """Runs the planned jobs one after another on a background thread."""
 
-    file_started = pyqtSignal(int, str)
-    file_progress = pyqtSignal(float)          # -1.0 means indeterminate
-    file_finished = pyqtSignal(int, bool, str)  # index, ok, message
-    finished_all = pyqtSignal(int, int, int)    # done, failed, skipped
+    file_started = pyqtSignal(int)
+    file_progress = pyqtSignal(float)                # -1.0 = indeterminate
+    file_finished = pyqtSignal(int, str, str, str)   # index, status, text, detail
+    finished_all = pyqtSignal(int, int, int)         # done, failed, skipped
 
     def __init__(self, job_list: list[Job]) -> None:
         super().__init__()
         self._jobs = job_list
         self._cancel = False
+        self._skip = False
 
     def cancel(self) -> None:
         self._cancel = True
+
+    def skip_current(self) -> None:
+        self._skip = True
 
     def run(self) -> None:  # noqa: D102 - Qt entry point
         done = failed = 0
@@ -55,13 +110,14 @@ class ConvertWorker(QThread):
             if job.status == "skipped":
                 continue
             if self._cancel:
-                job.status = "skipped"
-                job.message = "cancelled"
+                job.status, job.message = "skipped", "cancelled"
                 skipped += 1
+                self.file_finished.emit(index, "skipped", "cancelled", "")
                 continue
 
+            self._skip = False
             job.status = "running"
-            self.file_started.emit(index, job.src.name)
+            self.file_started.emit(index)
             self.file_progress.emit(-1.0)
 
             try:
@@ -69,47 +125,94 @@ class ConvertWorker(QThread):
                     job,
                     on_progress=lambda f: self.file_progress.emit(
                         -1.0 if f is None else float(f)),
-                    should_cancel=lambda: self._cancel,
+                    should_cancel=lambda: self._cancel or self._skip,
                 )
-                jobs_mod.finalise(job)
+                warning = jobs_mod.finalise(job)
                 job.status = "done"
                 done += 1
-                self.file_finished.emit(index, True, str(job.dest))
+                text = size_change(job.src_size, job.dest.stat().st_size)
+                if warning:
+                    text += f" — {warning}"
+                self.file_finished.emit(index, "done", text, str(job.dest))
             except runner.Cancelled:
                 jobs_mod.cleanup(job)
                 job.status = "skipped"
-                job.message = "cancelled"
+                job.message = "skipped" if not self._cancel else "cancelled"
                 skipped += 1
-                self.file_finished.emit(index, False, "cancelled")
-            except Exception as exc:  # noqa: BLE001 - surfaced in the log pane
+                self.file_finished.emit(index, "skipped", job.message, "")
+            except Exception as exc:  # noqa: BLE001 - surfaced in the UI
                 jobs_mod.cleanup(job)
                 job.status = "failed"
-                job.message = str(exc)
+                job.message = getattr(exc, "summary", str(exc))
                 failed += 1
-                self.file_finished.emit(index, False, str(exc))
+                self.file_finished.emit(index, "failed", job.message,
+                                        getattr(exc, "detail", str(exc)))
 
         self.finished_all.emit(done, failed, skipped)
 
 
 # --------------------------------------------------------------------------
-# quality overrides for the Custom… entry
+# quality: plain-language levels mapped onto each format's own scale
 # --------------------------------------------------------------------------
+
+LEVELS = ("Recommended", "Smaller file", "Higher quality", "Best quality",
+          "Exact value…")
+
+
+def _knob(preset: Preset) -> tuple[str, int] | None:
+    """(option, preset default) for the preset's quality setting, if any."""
+    for opt in ("-crf", "-quality", "-b:a", "-q:a"):
+        if opt in preset.args:
+            raw = preset.args[preset.args.index(opt) + 1]
+            return opt, int(raw.rstrip("k"))
+    return None
+
 
 def quality_range(preset: Preset) -> tuple[int, int] | None:
     """Valid values for the preset's quality knob, or None if it has none."""
-    if "-crf" in preset.args:
+    knob = _knob(preset)
+    if knob is None:
+        return None
+    opt = knob[0]
+    if opt == "-crf":
         # x264/x265 stop at 51; VP9 and SVT-AV1 go to 63.
-        if {"libx264", "libx265"} & set(preset.needs):
-            return (0, 51)
-        return (0, 63)
-    if "-quality" in preset.args:
+        return (0, 51) if {"libx264", "libx265"} & set(preset.needs) \
+            else (0, 63)
+    if opt == "-quality":
         return (1, 100)
-    if "-b:a" in preset.args:
+    if opt == "-b:a":
         return (32, 320)
-    if "-q:a" in preset.args:
-        # VBR scale: LAME 0 (best) to 9; Vorbis 0 to 10 (best).
-        return (0, 9) if "libmp3lame" in preset.needs else (0, 10)
-    return None
+    # -q:a VBR: LAME 0 (best) to 9; Vorbis 0 to 10 (best).
+    return (0, 9) if "libmp3lame" in preset.needs else (0, 10)
+
+
+def quality_for_level(preset: Preset, level: str) -> int | None:
+    """The value a named level means for this preset; None = preset default."""
+    knob = _knob(preset)
+    rng = quality_range(preset)
+    if knob is None or rng is None or level == "Recommended":
+        return None
+    opt, d = knob
+    lo, hi = rng
+    lower_is_better = opt == "-crf" or (opt == "-q:a"
+                                        and "libmp3lame" in preset.needs)
+    if opt == "-crf":
+        table = {"Smaller file": d + 6, "Higher quality": d - 4,
+                 "Best quality": d - 8}
+    elif opt == "-quality":
+        table = {"Smaller file": d - 20, "Higher quality": d + (100 - d) // 2,
+                 "Best quality": 100}
+    elif opt == "-b:a":
+        table = {"Smaller file": d - 64, "Higher quality": d + 64,
+                 "Best quality": 320}
+    elif lower_is_better:  # MP3 -q:a
+        table = {"Smaller file": d + 3, "Higher quality": d - 1,
+                 "Best quality": lo}
+    else:  # Vorbis -q:a
+        table = {"Smaller file": d - 2, "Higher quality": d + 2,
+                 "Best quality": hi}
+    value = table.get(level)
+    return None if value is None else max(lo, min(hi, value))
 
 
 def apply_overrides(preset: Preset, quality: int | None,
@@ -118,14 +221,11 @@ def apply_overrides(preset: Preset, quality: int | None,
     args = list(preset.args)
 
     if quality is not None:
-        if "-crf" in args:
-            args[args.index("-crf") + 1] = str(quality)
-        elif "-quality" in args:
-            args[args.index("-quality") + 1] = str(quality)
-        elif "-b:a" in args:
-            args[args.index("-b:a") + 1] = f"{quality}k"
-        elif "-q:a" in args:
-            args[args.index("-q:a") + 1] = str(quality)
+        for opt in ("-crf", "-quality", "-b:a", "-q:a"):
+            if opt in args:
+                value = f"{quality}k" if opt == "-b:a" else str(quality)
+                args[args.index(opt) + 1] = value
+                break
 
     if max_width and preset.tool == "ffmpeg" and "-vn" not in args:
         # Only shrink; never upscale a small source to the cap.
@@ -148,8 +248,73 @@ def apply_overrides(preset: Preset, quality: int | None,
 
 
 # --------------------------------------------------------------------------
+# desktop integration (local D-Bus only, all optional)
+# --------------------------------------------------------------------------
+
+def notify(summary: str, body: str, icon: str) -> None:
+    """Show a desktop notification via org.freedesktop.Notifications."""
+    try:
+        from PyQt6.QtCore import QMetaType
+        from PyQt6.QtDBus import (
+            QDBus, QDBusArgument, QDBusConnection, QDBusMessage,
+        )
+    except ImportError:
+        return
+    bus = QDBusConnection.sessionBus()
+    if not bus.isConnected():
+        return
+    msg = QDBusMessage.createMethodCall(
+        "org.freedesktop.Notifications", "/org/freedesktop/Notifications",
+        "org.freedesktop.Notifications", "Notify")
+    replaces = QDBusArgument()
+    replaces.add(0, QMetaType.Type.UInt.value)
+    actions = QDBusArgument()
+    actions.add([], QMetaType.Type.QStringList.value)
+    msg.setArguments(["Easy Convert", replaces, icon, summary, body,
+                      actions, {}, -1])
+    bus.call(msg, QDBus.CallMode.NoBlock)
+
+
+def show_in_file_manager(paths: list[Path]) -> None:
+    """Open the file manager with the new files selected.
+
+    Uses org.freedesktop.FileManager1.ShowItems (Dolphin implements it);
+    falls back to simply opening the folder.
+    """
+    if not paths:
+        return
+    try:
+        from PyQt6.QtCore import QMetaType
+        from PyQt6.QtDBus import QDBusArgument, QDBusConnection, QDBusMessage
+        bus = QDBusConnection.sessionBus()
+        if bus.isConnected():
+            msg = QDBusMessage.createMethodCall(
+                "org.freedesktop.FileManager1", "/org/freedesktop/FileManager1",
+                "org.freedesktop.FileManager1", "ShowItems")
+            uris = QDBusArgument()
+            uris.add([QUrl.fromLocalFile(str(p)).toString() for p in paths],
+                     QMetaType.Type.QStringList.value)
+            msg.setArguments([uris, ""])
+            reply = bus.call(msg)
+            if reply.type() != QDBusMessage.MessageType.ErrorMessage:
+                return
+    except ImportError:
+        pass
+    QDesktopServices.openUrl(QUrl.fromLocalFile(str(paths[0].parent)))
+
+
+# --------------------------------------------------------------------------
 # dialog
 # --------------------------------------------------------------------------
+
+STATUS_ICONS = {
+    "pending": QStyle.StandardPixmap.SP_FileIcon,
+    "running": QStyle.StandardPixmap.SP_MediaPlay,
+    "done": QStyle.StandardPixmap.SP_DialogApplyButton,
+    "failed": QStyle.StandardPixmap.SP_MessageBoxCritical,
+    "skipped": QStyle.StandardPixmap.SP_MediaSkipForward,
+}
+
 
 class ConvertDialog(QDialog):
     def __init__(self, paths: list[Path], preset: Preset | None,
@@ -162,10 +327,15 @@ class ConvertDialog(QDialog):
         self._worker: ConvertWorker | None = None
         self._jobs: list[Job] = []
         self._close_when_done = False
+        self._auto_started = False
+        self._outputs: list[Path] = []
+        self._bytes_before = self._bytes_after = 0
         self._settings = QSettings(ORG, ORG)
 
         self.setWindowTitle("Convert")
-        self.setMinimumWidth(520)
+        self.setWindowIcon(QIcon.fromTheme(WINDOW_ICONS[media],
+                                           QIcon.fromTheme("applications-multimedia")))
+        self.setMinimumWidth(560)
 
         self._stack = QStackedWidget(self)
         self._stack.addWidget(self._build_options_page())
@@ -173,6 +343,12 @@ class ConvertDialog(QDialog):
 
         layout = QVBoxLayout(self)
         layout.addWidget(self._stack)
+        self._update_preview()
+
+    def start_immediately(self) -> bool:
+        """True when the options page should be skipped for this run."""
+        return (not self._custom
+                and self._settings.value("start_immediately", False, type=bool))
 
     # ---- page 1: options ------------------------------------------------
 
@@ -182,24 +358,41 @@ class ConvertDialog(QDialog):
 
         count = len(self._paths)
         noun = "file" if count == 1 else "files"
-        heading = QLabel(f"<b>Convert {count} {noun}</b>")
-        layout.addWidget(heading)
-
         if self._custom:
+            layout.addWidget(QLabel(f"<b>Convert {count} {noun}</b>"))
             layout.addWidget(self._build_format_box())
         else:
             assert self._preset is not None
-            layout.addWidget(QLabel(f"Target format: <b>{self._preset.label}"
-                                    f"</b>"))
+            title = QLabel()
+            title.setTextFormat(Qt.TextFormat.PlainText)
+            title.setText(f"Convert {count} {noun} to {self._preset.label}")
+            font = title.font()
+            font.setBold(True)
+            title.setFont(font)
+            layout.addWidget(title)
 
         layout.addWidget(self._build_placement_box())
 
-        self._remember = QCheckBox("Remember this choice as my default")
+        self._preview = QLabel()
+        self._preview.setTextFormat(Qt.TextFormat.PlainText)
+        self._preview.setWordWrap(True)
+        layout.addWidget(self._preview)
+
+        self._remember = QCheckBox("Remember where I put files")
         layout.addWidget(self._remember)
+        self._skip_next = QCheckBox(
+            "Next time, start straight away for menu formats "
+            "(Custom… always asks)")
+        self._skip_next.setChecked(
+            self._settings.value("start_immediately", False, type=bool))
+        self._skip_next.toggled.connect(
+            lambda on: on and self._remember.setChecked(True))
+        layout.addWidget(self._skip_next)
 
         buttons = QDialogButtonBox()
         self._start_btn = buttons.addButton(
             "Convert", QDialogButtonBox.ButtonRole.AcceptRole)
+        self._start_btn.setDefault(True)
         buttons.addButton(QDialogButtonBox.StandardButton.Cancel)
         buttons.accepted.connect(self._start)
         buttons.rejected.connect(self.reject)
@@ -216,45 +409,78 @@ class ConvertDialog(QDialog):
             self._format_combo.addItem(preset.label, preset)
         form.addRow("Convert to:", self._format_combo)
 
-        self._quality = QSpinBox()
-        self._quality.setSpecialValueText("preset default")
-        form.addRow("Quality:", self._quality)
-        self._format_combo.currentIndexChanged.connect(self._update_quality)
+        self._level = QComboBox()
+        self._level.addItems(LEVELS)
+        self._exact = QSpinBox()
+        self._exact.setVisible(False)
+        row = QHBoxLayout()
+        row.addWidget(self._level, 1)
+        row.addWidget(self._exact)
+        form.addRow("Quality:", row)
+        self._level.currentTextChanged.connect(self._update_quality)
 
         self._max_width = QComboBox()
         self._max_width.addItem("Original size", 0)
-        for width in (3840, 2560, 1920, 1280, 854):
-            self._max_width.addItem(f"max {width}px wide", width)
-        form.addRow("Scale:", self._max_width)
+        for width, name in ((3840, "4K"), (2560, "1440p"), (1920, "1080p"),
+                            (1280, "720p"), (854, "480p")):
+            self._max_width.addItem(f"No wider than {width}px ({name})", width)
+        form.addRow("Size:", self._max_width)
 
-        hint = QLabel("<small>Quality: lower is better for video (CRF ~18-28) "
-                      "and MP3 (0-9); higher is better for images (1-100), "
-                      "OGG (0-10) and other audio (kbps).</small>")
-        hint.setWordWrap(True)
-        form.addRow(hint)
+        self._quality_hint = QLabel()
+        self._quality_hint.setWordWrap(True)
+        form.addRow(self._quality_hint)
 
         if self._format_combo.count() == 0:
             self._format_combo.addItem("no usable encoder found", None)
             self._format_combo.setEnabled(False)
-        self._update_quality()
+        self._format_combo.currentIndexChanged.connect(self._on_format_changed)
+        self._on_format_changed()
 
         return box
 
-    def _update_quality(self) -> None:
-        """Fit the quality spinner to the selected format's real range.
-
-        The lowest value is the "preset default" sentinel, one below the
-        smallest real setting, so CRF 0 (lossless) stays selectable.
-        """
+    def _on_format_changed(self) -> None:
         preset = self._format_combo.currentData()
-        lo_hi = quality_range(preset) if preset is not None else None
-        self._quality.setEnabled(lo_hi is not None)
-        lo, hi = lo_hi or (0, 0)
-        self._quality.setRange(lo - 1, hi)
-        self._quality.setValue(lo - 1)
+        rng = quality_range(preset) if preset is not None else None
+        self._level.setEnabled(rng is not None)
+        self._level.setCurrentIndex(0)
+        if rng is not None:
+            self._exact.setRange(*rng)
+            knob = _knob(preset)
+            if knob:
+                self._exact.setValue(knob[1])
+        self._max_width.setEnabled(preset is not None and "-vn" not in
+                                   preset.args and preset.ext != "pdf")
+        self._update_quality()
+        self._update_preview()
+
+    def _update_quality(self) -> None:
+        preset = self._format_combo.currentData()
+        exact = self._level.currentText() == LEVELS[-1] and \
+            self._level.isEnabled()
+        self._exact.setVisible(exact)
+        hint = ""
+        if preset is None or not self._level.isEnabled():
+            hint = "This format has no quality setting."
+        elif exact:
+            knob = _knob(preset)
+            hint = {"-crf": "CRF: lower is better quality and a bigger file.",
+                    "-quality": "1-100: higher is better quality and a "
+                                "bigger file.",
+                    "-b:a": "Bitrate in kbps: higher is better.",
+                    }.get(knob[0] if knob else "",
+                          "MP3: 0 is best, 9 smallest." if "libmp3lame" in
+                          preset.needs else "OGG: 10 is best, 0 smallest.")
+        self._quality_hint.setText(f"<small>{hint}</small>" if hint else "")
+
+    def _chosen_quality(self, preset: Preset) -> int | None:
+        if not self._level.isEnabled():
+            return None
+        if self._level.currentText() == LEVELS[-1]:
+            return self._exact.value()
+        return quality_for_level(preset, self._level.currentText())
 
     def _build_placement_box(self) -> QWidget:
-        box = QGroupBox("Where should the files go?")
+        box = QGroupBox("Where should the new files go?")
         layout = QVBoxLayout(box)
 
         self._mode_group = QButtonGroup(self)
@@ -267,12 +493,13 @@ class ConvertDialog(QDialog):
                 button.setChecked(True)
             self._mode_group.addButton(button, index)
             layout.addWidget(button)
-
         if self._mode_group.checkedButton() is None:
             self._mode_group.buttons()[0].setChecked(True)
+        self._mode_group.buttonToggled.connect(
+            lambda _b, on: on and self._update_preview())
 
-        note = QLabel("<small>Originals are never deleted. Nothing is "
-                      "overwritten — a clashing name gets a number.</small>")
+        note = QLabel("<small>Nothing is ever deleted or overwritten — a "
+                      "clashing name gets a number.</small>")
         note.setWordWrap(True)
         layout.addWidget(note)
         return box
@@ -280,6 +507,37 @@ class ConvertDialog(QDialog):
     def _selected_mode(self) -> OutputMode:
         button = self._mode_group.checkedButton()
         return OutputMode(button.property("mode"))
+
+    def _current_preset(self) -> Preset | None:
+        if self._custom:
+            return self._format_combo.currentData()
+        return self._preset
+
+    def _update_preview(self) -> None:
+        """Say what will happen before anything does."""
+        if not hasattr(self, "_preview"):
+            return
+        preset = self._current_preset()
+        if preset is None:
+            self._preview.setText("")
+            return
+        planned = jobs_mod.plan(self._paths, preset, self._selected_mode())
+        runnable = [j for j in planned if j.status != "skipped"]
+        skipped = [j for j in planned if j.status == "skipped"]
+        n = len(runnable)
+        lines = []
+        if n:
+            noun = "file" if n == 1 else "files"
+            lines.append(f"{n} {noun} will be saved "
+                         f"{WHERE[self._selected_mode()]}.")
+        if skipped:
+            lines.append(f"{len(skipped)} will be skipped:")
+            for job in skipped[:3]:
+                lines.append(f"  • {job.src.name} — {job.message}")
+            if len(skipped) > 3:
+                lines.append(f"  • …and {len(skipped) - 3} more")
+        self._preview.setText("\n".join(lines))
+        self._start_btn.setEnabled(n > 0)
 
     # ---- page 2: progress ----------------------------------------------
 
@@ -290,32 +548,48 @@ class ConvertDialog(QDialog):
         self._overall_label = QLabel("Preparing…")
         layout.addWidget(self._overall_label)
         self._overall_bar = QProgressBar()
+        self._overall_bar.setRange(0, 1000)
+        self._overall_bar.setTextVisible(False)
         layout.addWidget(self._overall_bar)
 
-        self._file_label = QLabel("")
-        # Filenames are untrusted: render them as text, never as rich text.
-        self._file_label.setTextFormat(Qt.TextFormat.PlainText)
-        self._file_label.setSizePolicy(QSizePolicy.Policy.Ignored,
-                                       QSizePolicy.Policy.Preferred)
-        layout.addWidget(self._file_label)
         self._file_bar = QProgressBar()
         layout.addWidget(self._file_bar)
+
+        self._list = QTreeWidget()
+        self._list.setHeaderLabels(["File", "Result"])
+        self._list.setRootIsDecorated(False)
+        self._list.setSelectionMode(
+            QAbstractItemView.SelectionMode.NoSelection)
+        self._list.header().setSectionResizeMode(
+            0, QHeaderView.ResizeMode.ResizeToContents)
+        self._list.header().setStretchLastSection(True)
+        self._list.setMinimumHeight(140)
+        layout.addWidget(self._list)
 
         self._log = QPlainTextEdit()
         self._log.setReadOnly(True)
         self._log.setVisible(False)
-        self._log.setMaximumHeight(160)
+        self._log.setMaximumHeight(140)
         layout.addWidget(self._log)
 
         row = QHBoxLayout()
-        self._log_btn = QPushButton("Show details")
+        self._log_btn = QPushButton("Technical details")
         self._log_btn.setCheckable(True)
         self._log_btn.toggled.connect(self._toggle_log)
         row.addWidget(self._log_btn)
         row.addStretch(1)
-        self._cancel_btn = QPushButton("Cancel")
+        self._skip_btn = QPushButton("Skip this file")
+        self._skip_btn.clicked.connect(self._skip_file)
+        row.addWidget(self._skip_btn)
+        self._cancel_btn = QPushButton("Stop all")
         self._cancel_btn.clicked.connect(self._cancel)
         row.addWidget(self._cancel_btn)
+        self._show_btn = QPushButton("Show in folder")
+        self._show_btn.setIcon(QIcon.fromTheme("folder-open"))
+        self._show_btn.clicked.connect(
+            lambda: show_in_file_manager(self._outputs))
+        self._show_btn.setVisible(False)
+        row.addWidget(self._show_btn)
         self._close_btn = QPushButton("Close")
         self._close_btn.clicked.connect(self.accept)
         self._close_btn.setVisible(False)
@@ -326,48 +600,58 @@ class ConvertDialog(QDialog):
 
     def _toggle_log(self, shown: bool) -> None:
         self._log.setVisible(shown)
-        self._log_btn.setText("Hide details" if shown else "Show details")
         self.adjustSize()
+
+    def _icon(self, status: str) -> QIcon:
+        return self.style().standardIcon(STATUS_ICONS[status])
 
     # ---- running --------------------------------------------------------
 
     def _start(self) -> None:
-        preset = self._preset
+        preset = self._current_preset()
+        if preset is None:
+            QMessageBox.warning(self, "Nothing to do",
+                                "No encoder on this system can produce "
+                                "that format.")
+            return
         if self._custom:
-            preset = self._format_combo.currentData()
-            if preset is None:
-                QMessageBox.warning(self, "Nothing to do",
-                                    "No encoder on this system can produce "
-                                    "that format.")
-                return
-            quality = (None if self._quality.value() == self._quality.minimum()
-                       or not self._quality.isEnabled()
-                       else self._quality.value())
             width = self._max_width.currentData() or None
-            preset = apply_overrides(preset, quality, width)
+            if not self._max_width.isEnabled():
+                width = None
+            preset = apply_overrides(preset, self._chosen_quality(preset),
+                                     width)
 
         mode = self._selected_mode()
-        if self._remember.isChecked():
-            self._settings.setValue("output_mode", mode.value)
+        if not self._auto_started:  # the person saw and used the options
+            if self._remember.isChecked():
+                self._settings.setValue("output_mode", mode.value)
+            self._settings.setValue("start_immediately",
+                                    self._skip_next.isChecked())
 
         self._jobs = jobs_mod.plan(self._paths, preset, mode)
         runnable = [j for j in self._jobs if j.status != "skipped"]
         if not runnable:
             QMessageBox.information(
                 self, "Nothing to convert",
-                "None of the selected files can be converted with this "
-                "preset.")
+                "None of the selected files can be converted to "
+                f"{preset.label}.")
             self.reject()
             return
 
+        self._list.clear()
         for job in self._jobs:
-            if job.status == "skipped":
-                self._append_log(f"skipped  {job.src.name} — {job.message}")
+            item = QTreeWidgetItem([job.src.name,
+                                    job.message if job.status == "skipped"
+                                    else "waiting"])
+            item.setIcon(0, self._icon("skipped" if job.status == "skipped"
+                                       else "pending"))
+            item.setToolTip(0, str(job.src))
+            self._list.addTopLevelItem(item)
 
         self._total = len(runnable)
         self._completed = 0
-        self._overall_bar.setRange(0, self._total)
-        self._overall_bar.setValue(0)
+        self._fraction = 0.0
+        self._started_at = time.monotonic()
         self.setWindowTitle(f"Converting to {preset.label}")
         self._stack.setCurrentIndex(1)
 
@@ -378,54 +662,109 @@ class ConvertDialog(QDialog):
         self._worker.finished_all.connect(self._on_all_finished)
         self._worker.start()
 
-    def _on_file_started(self, _index: int, name: str) -> None:
-        self._overall_label.setText(
-            f"File {self._completed + 1} of {self._total}")
-        self._file_label.setText(name)
+        self._eta_timer = QTimer(self)
+        self._eta_timer.timeout.connect(self._update_overall)
+        self._eta_timer.start(1000)
+
+    def _on_file_started(self, index: int) -> None:
+        self._fraction = 0.0
+        item = self._list.topLevelItem(index)
+        item.setIcon(0, self._icon("running"))
+        item.setText(1, "converting…")
+        self._list.scrollToItem(item)
+        self._skip_btn.setEnabled(True)
+        self._update_overall()
 
     def _on_file_progress(self, fraction: float) -> None:
         if fraction < 0:
             self._file_bar.setRange(0, 0)  # indeterminate
         else:
+            self._fraction = fraction
             self._file_bar.setRange(0, 100)
             self._file_bar.setValue(int(fraction * 100))
+            self._update_overall()
 
-    def _on_file_finished(self, index: int, ok: bool, message: str) -> None:
-        self._completed += 1
-        self._overall_bar.setValue(self._completed)
-        name = self._jobs[index].src.name
-        if ok:
-            self._append_log(f"ok       {name} → {Path(message).name}")
-        else:
-            self._append_log(f"FAILED   {name} — {message}")
-            if not self._log_btn.isChecked():
-                self._log_btn.setChecked(True)
+    def _update_overall(self) -> None:
+        if self._worker is None or not self._worker.isRunning():
+            return
+        overall = min((self._completed + self._fraction) / self._total, 1.0)
+        self._overall_bar.setValue(int(overall * 1000))
+        text = f"Converting {min(self._completed + 1, self._total)} " \
+               f"of {self._total}"
+        elapsed = time.monotonic() - self._started_at
+        if overall > 0.03 and elapsed > 5:
+            text += " · " + human_eta(elapsed / overall * (1 - overall))
+        self._overall_label.setText(text)
+
+    def _on_file_finished(self, index: int, status: str, text: str,
+                          detail: str) -> None:
+        job = self._jobs[index]
+        item = self._list.topLevelItem(index)
+        item.setIcon(0, self._icon(status))
+        item.setText(1, text)
+        if status in ("done", "failed") or text == "skipped":
+            self._completed += 1
+        if status == "done":
+            dest = Path(detail)
+            self._outputs.append(dest)
+            item.setToolTip(1, str(dest))
+            item.setText(0, f"{job.src.name}  →  {dest.name}")
+            self._bytes_before += job.src_size
+            try:
+                self._bytes_after += dest.stat().st_size
+            except OSError:
+                pass
+            self._log.appendPlainText(f"ok       {job.src} → {dest}")
+        elif status == "failed":
+            item.setToolTip(1, detail)
+            self._log.appendPlainText(f"FAILED   {job.src}\n         {detail}")
+        self._fraction = 0.0
+        self._update_overall()
 
     def _on_all_finished(self, done: int, failed: int, skipped: int) -> None:
+        self._eta_timer.stop()
+        self._overall_bar.setValue(1000)
         self._file_bar.setRange(0, 100)
-        self._file_bar.setValue(100 if failed == 0 else self._file_bar.value())
-        self._file_label.setText("")
+        self._file_bar.setValue(100)
+        self._file_bar.setVisible(False)
         parts = [f"{done} converted"]
         if failed:
             parts.append(f"{failed} failed")
         if skipped:
             parts.append(f"{skipped} skipped")
-        self._overall_label.setText("<b>Finished — " +
-                                    ", ".join(parts) + "</b>")
+        summary = ", ".join(parts)
+        if done and self._bytes_before:
+            saved = self._bytes_before - self._bytes_after
+            if saved > 0:
+                summary += f" · saved {human_size(saved)} " \
+                           f"({round(saved * 100 / self._bytes_before)}%)"
+        self._overall_label.setText(f"Finished — {summary}")
+        self._skip_btn.setVisible(False)
         self._cancel_btn.setVisible(False)
+        self._show_btn.setVisible(bool(self._outputs))
         self._close_btn.setVisible(True)
         self._close_btn.setDefault(True)
+        if failed and not self._log_btn.isChecked():
+            self._list.setFocus()
+
+        if not self.isActiveWindow():
+            QApplication.alert(self)
+            notify("Conversion finished" if not failed
+                   else "Conversion finished with problems",
+                   summary, WINDOW_ICONS[self._media])
         if self._close_when_done:
             self.accept()
 
-    def _append_log(self, text: str) -> None:
-        self._log.appendPlainText(text)
+    def _skip_file(self) -> None:
+        if self._worker is not None:
+            self._skip_btn.setEnabled(False)
+            self._worker.skip_current()
 
     def _cancel(self) -> None:
         if self._worker is not None:
             self._cancel_btn.setEnabled(False)
+            self._skip_btn.setEnabled(False)
             self._cancel_btn.setText("Stopping…")
-            self._overall_label.setText("Stopping the current file…")
             self._worker.cancel()
 
     def _running(self) -> bool:
@@ -454,6 +793,10 @@ def launch(paths: list[Path], preset: Preset | None, media: Media,
            custom: bool) -> int:
     app = QApplication([])
     app.setApplicationName("Easy Convert")
+    app.setDesktopFileName("dolphin-easy-convert")
     dialog = ConvertDialog(paths, preset, media, custom)
     dialog.show()
+    if dialog.start_immediately():
+        dialog._auto_started = True
+        QTimer.singleShot(0, dialog._start)
     return app.exec()

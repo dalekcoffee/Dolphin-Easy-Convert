@@ -12,6 +12,7 @@ fall back to an indeterminate bar rather than reporting a wrong number.
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import signal
@@ -20,13 +21,64 @@ from collections.abc import Callable, Iterator
 from pathlib import Path
 
 from .jobs import Job
-from .presets import (
+from .presets import (  # noqa: F401 - MAGICK_POLICY_DIR re-exported
+    MAGICK_POLICY_DIR, magick_env,
     FFMPEG_DECODE_FALLBACK, avif_backend, avif_ffmpeg_encoder, magick_can_read,
     magick_format, tool_path,
 )
 
 # Reports fractional progress in [0.0, 1.0], or None when it cannot be known.
 ProgressFn = Callable[[float | None], None]
+
+# Placed before every ffmpeg/ffprobe "-i". Only plain local files may be
+# opened, and the restriction is inherited by anything the input opens in
+# turn, so a playlist or reference file disguised as a video (HLS, DASH,
+# concat, ...) cannot make ffmpeg fetch a URL. Keeps the tool local-only.
+FFMPEG_LOCAL_ONLY = ("-protocol_whitelist", "file")
+
+
+# Common tool errors, in words a person can act on. The raw text is still
+# kept for the details pane.
+_FRIENDLY = (
+    ("No space left on device", "The disk is full."),
+    ("Permission denied", "No permission to write in this folder."),
+    ("Read-only file system", "This location is read-only."),
+    ("moov atom not found", "The file is damaged or was not fully copied."),
+    ("Invalid data found when processing input",
+     "The file is damaged, or is not really the format its name says."),
+    ("no decode delegate", "ImageMagick cannot read this kind of image."),
+    ("no encode delegate", "ImageMagick cannot write this format."),
+    ("not allowed by the security policy",
+     "Blocked by the security policy: this file asks ImageMagick to do "
+     "something unsafe (fetch a URL, run a script)."),
+    ("Protocol not on whitelist",
+     "Blocked: this file tries to load other files or a network address."),
+    ("Could not find tag for codec",
+     "MP4 cannot hold the codecs in this file without re-encoding. "
+     "Use \"MP4 (H.264)\" instead."),
+    ("codec not currently supported in container",
+     "MP4 cannot hold the codecs in this file without re-encoding. "
+     "Use \"MP4 (H.264)\" instead."),
+    ("does not contain any stream", "This file has no audio track to extract."),
+    ("Decoder (codec", "ffmpeg cannot decode the codec used in this file."),
+)
+
+
+class ToolError(RuntimeError):
+    """A conversion failure with a plain-language summary and raw detail."""
+
+    def __init__(self, summary: str, detail: str = "") -> None:
+        super().__init__(summary)
+        self.summary = summary
+        self.detail = detail or summary
+
+
+def explain(raw: str) -> ToolError:
+    """Wrap raw tool output in a ToolError with a readable summary."""
+    for needle, summary in _FRIENDLY:
+        if needle.lower() in raw.lower():
+            return ToolError(summary, raw)
+    return ToolError(raw, raw)
 
 
 class Cancelled(Exception):
@@ -40,7 +92,7 @@ def probe_duration(path: Path) -> float | None:
         return None
     try:
         res = subprocess.run(
-            [exe, "-v", "error",
+            [exe, "-v", "error", *FFMPEG_LOCAL_ONLY,
              "-show_entries", "format=duration",
              "-of", "default=noprint_wrappers=1:nokey=1", str(path)],
             capture_output=True, text=True, timeout=30, check=False,
@@ -90,21 +142,48 @@ def run_ffmpeg(job: Job, on_progress: ProgressFn,
 
     # temp_dest keeps the real extension on the end, so ffmpeg selects the
     # muxer from it exactly as it would for the final filename.
+    args = list(job.preset.args)
+    cover = _cover_stream(job.src) if job.preset.keep_cover else None
+    if cover is not None:
+        # Keep the album art: main audio plus the embedded picture, copied
+        # as-is and flagged as cover art, instead of "-vn" dropping it.
+        args.remove("-vn")
+        args = ["-map", "0:a:0", "-map", f"0:{cover}", "-c:v", "copy",
+                "-disposition:v:0", "attached_pic", *args]
+
     cmd = [
         exe, "-hide_banner", "-nostdin", "-loglevel", "error",
         "-nostats", "-progress", "pipe:1",
-        "-i", str(job.src),
-        *job.preset.args,
+        *FFMPEG_LOCAL_ONLY, "-i", str(job.src),
+        *args,
         "-y", str(job.temp_dest),
     ]
 
+    _stream(cmd, job, on_progress, should_cancel,
+            parse=lambda line: _parse_ffmpeg_line(line, total))
+
+
+def _cover_stream(path: Path) -> int | None:
+    """Index of an embedded JPEG/PNG cover picture, or None."""
+    exe = tool_path("ffprobe")
+    if not exe:
+        return None
     try:
-        _stream(cmd, job, on_progress, should_cancel,
-                parse=lambda line: _parse_ffmpeg_line(line, total))
-    except RuntimeError as exc:
-        if "-vn" in job.preset.args and "does not contain any stream" in str(exc):
-            raise RuntimeError("this file has no audio track to extract") from exc
-        raise
+        res = subprocess.run(
+            [exe, "-v", "error", *FFMPEG_LOCAL_ONLY,
+             "-show_entries",
+             "stream=index,codec_name:stream_disposition=attached_pic",
+             "-of", "json", str(path)],
+            capture_output=True, text=True, timeout=30, check=False,
+        )
+        streams = json.loads(res.stdout or "{}").get("streams", [])
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return None
+    for st in streams:
+        if (st.get("disposition", {}).get("attached_pic") == 1
+                and st.get("codec_name") in {"mjpeg", "png"}):
+            return int(st["index"])
+    return None
 
 
 def _parse_ffmpeg_line(line: str, total: float | None) -> float | None:
@@ -209,7 +288,7 @@ def run_magick(job: Job, on_progress: ProgressFn,
             spec = f"{src}[0]" if job.preset.ext != "pdf" else str(src)
             cmd = [exe, spec, "-monitor", *args, f"{out_fmt}:{target}"]
             tail = _stream(cmd, job, stage_progress, should_cancel,
-                           parse=_parse_magick_line)
+                           parse=_parse_magick_line, env=magick_env())
             _require_output(target, tail, "ImageMagick")
 
         try:
@@ -229,7 +308,8 @@ def run_magick(job: Job, on_progress: ProgressFn,
                 _ffmpeg_decode_still(job, job.src, decoded, stage_progress,
                                      should_cancel)
             except RuntimeError as ff_exc:
-                raise RuntimeError(f"ImageMagick: {exc}; {ff_exc}") from exc
+                raise ToolError(getattr(exc, "summary", str(exc)),
+                                f"ImageMagick: {exc}; {ff_exc}") from exc
             convert(decoded)
         done += 1
 
@@ -256,7 +336,7 @@ def _require_output(path: Path, tail: list[str], tool: str) -> None:
     except OSError:
         pass
     detail = " / ".join(t for t in tail[-4:] if "=" not in t)
-    raise RuntimeError(detail or f"{tool} exited without writing any output")
+    raise explain(detail or f"{tool} exited without writing any output")
 
 
 def _ffmpeg_still_cmd(src: Path) -> list[str]:
@@ -264,8 +344,8 @@ def _ffmpeg_still_cmd(src: Path) -> list[str]:
     if not exe:
         raise RuntimeError("ffmpeg is not installed")
     return [exe, "-hide_banner", "-nostdin", "-loglevel", "error",
-            "-nostats", "-progress", "pipe:1", "-i", str(src),
-            "-frames:v", "1"]
+            "-nostats", "-progress", "pipe:1",
+            *FFMPEG_LOCAL_ONLY, "-i", str(src), "-frames:v", "1"]
 
 
 def _ffmpeg_decode_still(job: Job, src: Path, dest: Path,
@@ -313,7 +393,8 @@ def _ffmpeg_encode_avif(job: Job, src: Path, quality: int | None,
 
 def _stream(cmd: list[str], job: Job, on_progress: ProgressFn,
             should_cancel: Callable[[], bool],
-            parse: Callable[[str], float | None]) -> list[str]:
+            parse: Callable[[str], float | None],
+            env: dict[str, str] | None = None) -> list[str]:
     """Run a command, feeding each output line to `parse` for a percentage.
 
     Returns the last few output lines, so callers can explain a run that
@@ -332,6 +413,7 @@ def _stream(cmd: list[str], job: Job, on_progress: ProgressFn,
             errors="replace",
             bufsize=1,
             start_new_session=True,  # so cancelling cannot signal our own group
+            env=env,
         )
     except OSError as exc:
         raise RuntimeError(f"could not start {cmd[0]}: {exc}") from exc
@@ -358,7 +440,7 @@ def _stream(cmd: list[str], job: Job, on_progress: ProgressFn,
     if proc.returncode != 0:
         detail = " / ".join(t for t in tail[-4:] if "=" not in t) or \
                  f"exit status {proc.returncode}"
-        raise RuntimeError(detail)
+        raise explain(detail)
     return tail
 
 

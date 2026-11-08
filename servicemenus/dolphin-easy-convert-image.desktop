@@ -4,7 +4,7 @@ X-KDE-ServiceTypes=KonqPopupMenu/Plugin
 X-KDE-Submenu=Convert To
 Icon=applications-graphics
 MimeType=image/png;image/jpeg;image/webp;image/avif;image/tiff;image/bmp;image/gif;image/heif;image/heic;image/x-portable-pixmap;image/x-portable-graymap;image/x-tga;image/vnd.microsoft.icon;image/svg+xml;image/vnd.adobe.photoshop;image/x-xcf;image/jxl;
-Actions=png;jpeg;webp;avif;tiff;pdf;custom;
+Actions=png;jpeg;jpegClean;webp;avif;tiff;pdf;custom;
 
 [Desktop Action png]
 Name=PNG (lossless)
@@ -15,6 +15,11 @@ Exec=dolphin-easy-convert --preset png %F
 Name=JPEG
 Icon=image-x-generic
 Exec=dolphin-easy-convert --preset jpeg %F
+
+[Desktop Action jpegClean]
+Name=JPEG (remove location & camera info)
+Icon=security-high
+Exec=dolphin-easy-convert --preset jpeg-clean %F
 
 [Desktop Action webp]
 Name=WebP

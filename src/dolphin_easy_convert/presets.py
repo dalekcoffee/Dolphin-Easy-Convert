@@ -10,10 +10,12 @@ from __future__ import annotations
 
 import dataclasses
 import functools
+import os
 import re
 import shutil
 import subprocess
 from enum import Enum
+from pathlib import Path
 
 
 class Media(str, Enum):
@@ -33,6 +35,7 @@ class Preset:
     tool: str  # "ffmpeg" or "magick"
     args: tuple[str, ...] = ()  # options placed between input and output
     needs: tuple[str, ...] = ()  # ffmpeg encoder names that must be present
+    keep_cover: bool = False  # carry embedded album art over (audio only)
 
     @property
     def is_video_target(self) -> bool:
@@ -41,41 +44,70 @@ class Preset:
 
 _AV = (Media.VIDEO, Media.AUDIO)
 
-# Video presets pass -sn. Without it ffmpeg carries one subtitle stream over
-# and must re-encode it into the target's subtitle format (mov_text for MP4,
-# WebVTT for WebM), which fails outright for bitmap subtitles such as the
-# PGS/VobSub tracks common in MKV rips: "Subtitle encoding currently only
-# possible from text to text or bitmap to bitmap".
+# Video presets map streams explicitly:
+#   0:V:0  the main video (capital V skips cover art / thumbnails)
+#   0:a?   EVERY audio track, so a second language is not silently lost
+#          (ffmpeg's default picks only one); "?" allows silent videos
+# Subtitles are left out on purpose. Carrying them over means re-encoding
+# into the target's subtitle format (mov_text for MP4, WebVTT for WebM),
+# which fails outright for bitmap subtitles such as the PGS/VobSub tracks
+# common in MKV rips.
+_KEEP_AV = ("-map", "0:V:0", "-map", "0:a?")
+
+# Rotate phone photos upright using their EXIF orientation before
+# converting; formats and viewers that ignore the tag would show them
+# sideways otherwise.
+_UPRIGHT = ("-auto-orient",)
 
 PRESETS: tuple[Preset, ...] = (
     # ---- video -> video -------------------------------------------------
     Preset(
         "mp4-h264", "MP4 (H.264)", (Media.VIDEO,), "mp4", "ffmpeg",
-        ("-sn", "-c:v", "libx264", "-crf", "20", "-preset", "medium",
+        (*_KEEP_AV, "-c:v", "libx264", "-crf", "20", "-preset", "medium",
+         "-pix_fmt", "yuv420p",
          "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart"),
         needs=("libx264", "aac"),
     ),
     Preset(
         "mkv-h265", "MKV (H.265 / smaller)", (Media.VIDEO,), "mkv", "ffmpeg",
-        ("-sn", "-c:v", "libx265", "-crf", "24", "-preset", "medium",
+        (*_KEEP_AV, "-c:v", "libx265", "-crf", "24", "-preset", "medium",
          "-c:a", "aac", "-b:a", "192k"),
         needs=("libx265", "aac"),
     ),
     Preset(
         "webm-vp9", "WebM (VP9)", (Media.VIDEO,), "webm", "ffmpeg",
-        ("-sn", "-c:v", "libvpx-vp9", "-crf", "32", "-b:v", "0",
+        (*_KEEP_AV, "-c:v", "libvpx-vp9", "-crf", "32", "-b:v", "0",
          "-c:a", "libopus", "-b:a", "128k"),
         needs=("libvpx-vp9", "libopus"),
     ),
     Preset(
         "mp4-av1", "MP4 (AV1 / smallest)", (Media.VIDEO,), "mp4", "ffmpeg",
-        ("-sn", "-c:v", "libsvtav1", "-crf", "32", "-preset", "6",
+        (*_KEEP_AV, "-c:v", "libsvtav1", "-crf", "32", "-preset", "6",
          "-c:a", "libopus", "-b:a", "128k"),
         needs=("libsvtav1", "libopus"),
     ),
     Preset(
+        "mp4-share", "MP4 (small, for sharing)", (Media.VIDEO,), "mp4",
+        "ffmpeg",
+        # 720p-class, stereo, 8-bit 4:2:0: plays on any phone or chat app.
+        ("-map", "0:V:0", "-map", "0:a:0?",
+         "-vf", "scale='min(1280,iw)':-2",
+         "-c:v", "libx264", "-crf", "26", "-preset", "medium",
+         "-pix_fmt", "yuv420p",
+         "-c:a", "aac", "-b:a", "128k", "-ac", "2",
+         "-movflags", "+faststart"),
+        needs=("libx264", "aac"),
+    ),
+    Preset(
+        "mp4-copy", "MP4 (fast, no re-encode)", (Media.VIDEO,), "mp4",
+        "ffmpeg",
+        # Repackages the existing streams: seconds instead of minutes and no
+        # quality loss, when the codecs inside are ones MP4 can hold.
+        (*_KEEP_AV, "-c", "copy", "-movflags", "+faststart"),
+    ),
+    Preset(
         "gif", "Animated GIF", (Media.VIDEO,), "gif", "ffmpeg",
-        ("-sn", "-an", "-vf", "fps=12,scale=480:-1:flags=lanczos,"
+        ("-map", "0:V:0", "-vf", "fps=12,scale=480:-1:flags=lanczos,"
                 "split[a][b];[a]palettegen[p];[b][p]paletteuse",
          "-loop", "0"),
     ),
@@ -83,12 +115,12 @@ PRESETS: tuple[Preset, ...] = (
     Preset(
         "mp3", "MP3", _AV, "mp3", "ffmpeg",
         ("-vn", "-c:a", "libmp3lame", "-q:a", "2"),
-        needs=("libmp3lame",),
+        needs=("libmp3lame",), keep_cover=True,
     ),
     Preset(
         "flac", "FLAC (lossless)", _AV, "flac", "ffmpeg",
         ("-vn", "-c:a", "flac"),
-        needs=("flac",),
+        needs=("flac",), keep_cover=True,
     ),
     Preset(
         "ogg", "OGG (Vorbis)", _AV, "ogg", "ffmpeg",
@@ -103,7 +135,7 @@ PRESETS: tuple[Preset, ...] = (
     Preset(
         "m4a", "M4A (AAC)", _AV, "m4a", "ffmpeg",
         ("-vn", "-c:a", "aac", "-b:a", "192k"),
-        needs=("aac",),
+        needs=("aac",), keep_cover=True,
     ),
     Preset(
         "wav", "WAV (uncompressed)", _AV, "wav", "ffmpeg",
@@ -111,15 +143,21 @@ PRESETS: tuple[Preset, ...] = (
         needs=("pcm_s16le",),
     ),
     # ---- image -> image -------------------------------------------------
-    Preset("png", "PNG (lossless)", (Media.IMAGE,), "png", "magick"),
+    Preset("png", "PNG (lossless)", (Media.IMAGE,), "png", "magick",
+           _UPRIGHT),
     Preset("jpeg", "JPEG", (Media.IMAGE,), "jpg", "magick",
-           ("-quality", "90")),
+           (*_UPRIGHT, "-quality", "90")),
+    Preset("jpeg-clean", "JPEG (remove location & camera info)",
+           (Media.IMAGE,), "jpg", "magick",
+           # -strip drops EXIF/XMP/IPTC (GPS position, camera, timestamps)
+           # and comments; -auto-orient first so the photo stays upright.
+           (*_UPRIGHT, "-strip", "-quality", "90")),
     Preset("webp-img", "WebP", (Media.IMAGE,), "webp", "magick",
-           ("-quality", "85")),
+           (*_UPRIGHT, "-quality", "85")),
     Preset("avif", "AVIF (smallest)", (Media.IMAGE,), "avif", "magick",
-           ("-quality", "60")),
-    Preset("tiff", "TIFF", (Media.IMAGE,), "tiff", "magick"),
-    Preset("pdf", "PDF", (Media.IMAGE,), "pdf", "magick"),
+           (*_UPRIGHT, "-quality", "60")),
+    Preset("tiff", "TIFF", (Media.IMAGE,), "tiff", "magick", _UPRIGHT),
+    Preset("pdf", "PDF", (Media.IMAGE,), "pdf", "magick", _UPRIGHT),
 )
 
 PRESETS_BY_ID = {p.id: p for p in PRESETS}
@@ -129,8 +167,38 @@ PRESETS_BY_ID = {p.id: p for p in PRESETS}
 # capability probing
 # --------------------------------------------------------------------------
 
+# Where the RPM's file dependencies (/usr/bin/ffmpeg, /usr/bin/magick, ...)
+# put the tools. Preferred over $PATH so a same-named program in
+# ~/.local/bin or ~/bin (an AppImage, a pip shim, or something planted)
+# never stands in for the packaged one.
+SYSTEM_BIN = Path("/usr/bin")
+
+
+# Extra ImageMagick policy shipped with the package (see magick/policy.xml):
+# no network coders or delegates, no script interpreters. Applied to every
+# magick process this program starts, including the format probe.
+MAGICK_POLICY_DIR = Path(__file__).resolve().parent / "magick"
+
+
+def magick_env() -> dict[str, str]:
+    """Environment for magick: the system policy plus ours on top."""
+    env = dict(os.environ)
+    extra = env.get("MAGICK_CONFIGURE_PATH")
+    env["MAGICK_CONFIGURE_PATH"] = (
+        f"{MAGICK_POLICY_DIR}{os.pathsep}{extra}" if extra
+        else str(MAGICK_POLICY_DIR))
+    return env
+
+
 def tool_path(tool: str) -> str | None:
-    """Absolute path of an external tool, or None if it is not installed."""
+    """Absolute path of an external tool, or None if it is not installed.
+
+    The packaged /usr/bin copy wins. $PATH is only consulted when there is
+    none, which is the case for running from a source checkout elsewhere.
+    """
+    system = SYSTEM_BIN / tool
+    if system.is_file() and os.access(system, os.X_OK):
+        return str(system)
     return shutil.which(tool)
 
 
@@ -217,6 +285,7 @@ def magick_formats() -> dict[str, str]:
         out = subprocess.run(
             [exe, "-list", "format"],
             capture_output=True, text=True, timeout=20, check=False,
+            env=magick_env(),
         ).stdout
     except (OSError, subprocess.SubprocessError):
         return {}

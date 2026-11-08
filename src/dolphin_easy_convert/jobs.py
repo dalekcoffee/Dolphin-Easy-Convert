@@ -3,8 +3,9 @@
 This is the file to read if you want to know whether this program can lose your
 data. The rules it enforces:
 
-  * Nothing is ever deleted. The only destructive-looking mode *moves* an
-    original into a subdirectory, and only after its conversion succeeded.
+  * Nothing is ever deleted. Originals are only ever *moved* -- into an
+    "originals" subfolder, or to the desktop Trash where they can be
+    restored -- and only after their conversion succeeded.
   * Nothing is ever overwritten. A name collision gets a numeric suffix,
     including collisions between files in the same batch, and the final
     move re-checks atomically in case a file appeared meanwhile.
@@ -39,6 +40,7 @@ class OutputMode(str, Enum):
 
     SUBDIR_CONVERTED = "converted-subdir"   # new files -> ./converted/
     SUBDIR_ORIGINALS = "originals-subdir"   # old files -> ./originals/
+    TRASH_ORIGINALS = "trash-originals"     # new files replace, old -> Trash
     INPLACE_SUFFIX = "inplace-suffix"       # everything stays, "-conv" added
 
 
@@ -47,6 +49,9 @@ MODE_LABELS = {
         'Put converted files in a "converted" subfolder',
     OutputMode.SUBDIR_ORIGINALS:
         'Keep converted files here, move originals to "originals"',
+    OutputMode.TRASH_ORIGINALS:
+        "Replace the originals (old files go to the Trash, so you can "
+        "restore them)",
     OutputMode.INPLACE_SUFFIX:
         'Keep everything here, add "-conv" to converted files',
 }
@@ -76,6 +81,8 @@ class Job:
     dest: Path
     preset: Preset
     move_original_to: Path | None = None  # set only in SUBDIR_ORIGINALS mode
+    trash_original: bool = False  # set only in TRASH_ORIGINALS mode
+    src_size: int = 0  # bytes, recorded at planning time for "space saved"
 
     # filled in as the job runs
     status: str = "pending"  # pending | running | done | failed | skipped
@@ -252,32 +259,84 @@ def plan(paths: list[Path], preset: Preset, mode: OutputMode) -> list[Job]:
             reserved.add(keep)
             jobs.append(Job(src, dest, preset, move_original_to=keep))
 
+        elif mode is OutputMode.TRASH_ORIGINALS:
+            # Same name as the source when the format changes; when it does
+            # not (JPEG -> JPEG without metadata), a numbered name for now,
+            # renamed onto the original's name once that is in the Trash.
+            dest = _unique(src.parent / f"{src.stem}.{preset.ext}", reserved)
+            jobs.append(Job(src, dest, preset, trash_original=True))
+
         else:  # INPLACE_SUFFIX
             dest = _unique(src.parent / f"{src.stem}{SUFFIX}.{preset.ext}",
                            reserved)
             jobs.append(Job(src, dest, preset))
         reserved.add(jobs[-1].dest)
 
+    for job in jobs:
+        if job.status != "skipped":
+            try:
+                job.src_size = job.src.stat().st_size
+            except OSError:
+                pass
     return jobs
 
 
-def finalise(job: Job) -> None:
+def finalise(job: Job) -> str | None:
     """Put a finished conversion in place. Called only after the tool exits 0.
 
     Ordering matters: the new file is moved into position first, and only then
     is the original relocated. If anything raises, the original has not moved.
+
+    Returns a warning for the user when the conversion succeeded but the
+    original could not be put away, else None.
     """
     if job.temp_dest is None:
         raise RuntimeError("internal error: job finished without a scratch file")
+    src_stat = job.src.stat()
     job.dest.parent.mkdir(parents=True, exist_ok=True)
     # Planned names were free at planning time; _place re-checks atomically,
     # so a file that appeared since is stepped around, never replaced.
     job.dest = _place(job.temp_dest, job.dest)
     job.temp_dest = None
+    _copy_dates(src_stat, job.dest)
 
     if job.move_original_to is not None:
         job.move_original_to.parent.mkdir(parents=True, exist_ok=True)
         job.move_original_to = _place(job.src, job.move_original_to)
+
+    if job.trash_original:
+        if not move_to_trash(job.src):
+            return "converted, but the original could not be moved to the " \
+                   "Trash, so it was left where it was"
+        wanted = job.src.with_suffix(job.dest.suffix)
+        if job.dest != wanted and not os.path.lexists(wanted):
+            job.dest = _place(job.dest, wanted)
+    return None
+
+
+def _copy_dates(src_stat: os.stat_result, dest: Path) -> None:
+    """Give the new file the original's dates, so date-sorted photo and
+    music libraries keep their order."""
+    try:
+        os.utime(dest, ns=(src_stat.st_atime_ns, src_stat.st_mtime_ns),
+                 follow_symlinks=False)
+    except OSError:
+        pass
+
+
+def move_to_trash(path: Path) -> bool:
+    """Move a file to the desktop Trash (freedesktop.org spec), via Qt.
+
+    Recoverable from Dolphin's Trash, which is why this mode does not break
+    the "never deletes" rule. Returns False rather than deleting anything if
+    the Trash is unavailable (e.g. some removable or network drives).
+    """
+    try:
+        from PyQt6.QtCore import QFile
+    except ImportError:
+        return False
+    ok, _where = QFile.moveToTrash(str(path))
+    return bool(ok)
 
 
 def cleanup(job: Job) -> None:

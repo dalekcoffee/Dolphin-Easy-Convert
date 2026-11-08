@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Extra ImageMagick security policy used only by Easy Convert.
+
+  Easy Convert points MAGICK_CONFIGURE_PATH at this directory for the magick
+  processes it starts. ImageMagick loads this file in addition to the
+  system policy (it does not replace it) and evaluates rules in order, last
+  match winning, so these rules only take rights away.
+
+  Goals:
+    * no network access: ImageMagick can fetch http/https/ftp URLs itself or
+      through its curl delegate, including from inside an SVG;
+    * no script interpreters or external programs this tool never needs
+      (MSL/MVG scripting, Ghostscript for PostScript/EPS/XPS, office
+      documents, screen capture, display windows);
+    * no "@file" indirection, which reads a list of further files to open.
+
+  PDF *output* is written natively and is unaffected. SVG, HEIC/AVIF, WebP
+  and JPEG XL are read through libraries, not the delegates listed here.
+-->
+<policymap>
+  <!-- network -->
+  <policy domain="coder" rights="none" pattern="{URL,HTTP,HTTPS,FTP,FTPS}"/>
+  <policy domain="module" rights="none" pattern="URL"/>
+  <policy domain="delegate" rights="none"
+          pattern="{http:decode,https:decode,browse,htm,html,shtml}"/>
+
+  <!-- interpreters and external programs never needed here -->
+  <policy domain="coder" rights="none"
+          pattern="{MSL,MVG,TEXT,EPHEMERAL,X,SHOW,WIN,PS,PS2,PS3,EPS,EPI,EPSF,EPSI,EPT,XPS,PCL}"/>
+  <policy domain="delegate" rights="none"
+          pattern="{ps,ps:*,eps,xps:*,pcl:*,video:*,doc,docx,dot,odt,odg,ppt,pptx,xls,xlsx,vsd,vsdx,epub,blender,clipboard,edit,show,win,open,launch,print,prt}"/>
+
+  <!-- "@list.txt" would make ImageMagick open every file named inside -->
+  <policy domain="path" rights="none" pattern="@*"/>
+</policymap>

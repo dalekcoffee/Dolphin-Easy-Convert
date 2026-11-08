@@ -13,9 +13,20 @@ No attempt is made to support other distributions.
   a single process (`%F`), so you get one progress window, not one per file.
 - **Only appears on files it can handle.** Each menu file lists explicit MIME
   types, so the entry is absent on a `.txt` and present on a `.mkv`.
-- **Progress window** with per-file and overall bars, a details pane for
-  errors, and a cancel button that stops the running encoder.
-- **You choose where files go, every time.**
+- **Shows what will happen first.** Before converting, the window says how
+  many files will be saved where, and which will be skipped and why.
+- **Progress window** listing every file with its result and size change,
+  time remaining, *Skip this file* and *Stop all*, and *Show in folder* when
+  done. If the window is in the background you get a notification.
+- **Plain-language errors.** "The disk is full", "MP4 cannot hold these
+  codecs without re-encoding", and so on; the raw tool output is under
+  *Technical details*.
+- **Keeps what matters.** Every audio track in a video, album art in MP3,
+  M4A and FLAC, tags, and the original file dates. Phone photos are turned
+  upright.
+- **You choose where files go** — every time, or tick *start straight away*
+  to skip the question for menu formats (*Custom…* always asks, and is where
+  you turn that off again).
 
 ## Where converted files go
 
@@ -25,14 +36,17 @@ Asked at the start of each conversion:
 |---|---|
 | `converted` subfolder | New files land in `./converted/`, originals untouched |
 | `originals` subfolder | New files land beside the old ones; originals move to `./originals/` |
+| replace originals | New files take the originals' place; the old files go to the **Trash**, where Dolphin can restore them |
 | in place | Everything stays put; new files get `-conv` appended |
 
-Tick **Remember this choice as my default** to have it pre-selected next time.
+Tick **Remember where I put files** to have it pre-selected next time.
 
 ### What it will not do to your files
 
-- **Never deletes.** The `originals` mode *moves* a file, and only after that
-  file's conversion has succeeded.
+- **Never deletes.** Originals are only ever *moved* — into `originals/`, or
+  to the Trash — and only after that file's conversion has succeeded. If the
+  Trash isn't available (some removable or network drives) the original is
+  left where it was and you are told.
 - **Never overwrites.** A name collision gets a number: `clip-conv.mp4`,
   `clip-conv-1.mp4`, and so on. That includes two files in one batch that
   would produce the same name (`clip.mkv` and `clip.mov` → MP4), and the final
@@ -60,12 +74,17 @@ short and it is the only place that decides what happens to your files.
 Presets are filtered at runtime against `ffmpeg -encoders`, so anything your
 ffmpeg build cannot produce never appears in the menu.
 
-- **Video** → MP4 (H.264), MKV (H.265), WebM (VP9), MP4 (AV1), animated GIF,
-  and audio extraction to MP3, OGG or FLAC. Video presets drop subtitle
-  tracks: bitmap subtitles (PGS/VobSub) can't be converted to MP4 or WebM
-  subtitle formats and would otherwise make the whole conversion fail.
-- **Audio** → MP3, FLAC, Opus, M4A (AAC), WAV
-- **Image** → PNG, JPEG, WebP, AVIF, TIFF, PDF
+- **Video** → MP4 (H.264), **MP4 (small, for sharing)** — 720p, plays on any
+  phone or chat app — **MP4 (fast, no re-encode)** — repackages in seconds
+  with no quality loss when the codecs fit — MKV (H.265), WebM (VP9),
+  MP4 (AV1), animated GIF, and audio extraction to MP3, OGG or FLAC.
+  Video presets keep every audio track and drop subtitle tracks: bitmap
+  subtitles (PGS/VobSub) can't be converted to MP4 or WebM subtitle formats
+  and would otherwise make the whole conversion fail.
+- **Audio** → MP3, FLAC, OGG, Opus, M4A (AAC), WAV
+- **Image** → PNG, JPEG, **JPEG (remove location & camera info)** — strips
+  GPS position, camera details and other metadata before you share a photo —
+  WebP, AVIF, TIFF, PDF
 
 Image presets are filtered the same way, against `magick -list format`.
 
@@ -76,9 +95,33 @@ ffmpeg, and encodes AVIF output with `libsvtav1` or `libaom-av1`. The ffmpeg
 encode path drops transparency. `dolphin-easy-convert --check` shows which path
 is in use.
 
-**Custom…** opens the same window with a format dropdown, a quality control
-(CRF for video, quality for images, kbps for audio) and an optional
-scale-down cap.
+**Custom…** opens the same window with a format dropdown, a quality choice —
+*Recommended*, *Smaller file*, *Higher quality*, *Best quality*, or an exact
+number — and an optional size cap (4K/1440p/1080p/720p/480p) that only ever
+shrinks.
+
+## Local only
+
+Easy Convert never connects to the internet, and makes sure the tools it runs
+don't either:
+
+- **ffmpeg / ffprobe** get `-protocol_whitelist file`: only local files can
+  be opened, including by anything a file references (playlists, concat
+  lists), so a disguised playlist can't fetch a URL.
+- **ImageMagick** runs with an extra security policy
+  ([`magick/policy.xml`](src/dolphin_easy_convert/magick/policy.xml)) that
+  blocks its URL/HTTP/FTP readers and its `curl` delegate, script
+  interpreters (MSL, MVG), Ghostscript and `@file` lists.
+- **No downloaded dependencies.** Everything comes from Fedora's own
+  repositories through `dnf`: Python, PyQt6, ffmpeg and ImageMagick. There
+  are no pip packages, nothing is bundled, and the build makes no network
+  requests. The tools are run from `/usr/bin`, not whatever is first on your
+  `$PATH`, and the launcher starts Python in isolated mode so no
+  user-installed module can be loaded in place of the real ones.
+- The only other contact is your own desktop session over local D-Bus: a
+  "finished" notification and asking Dolphin to show the new files.
+
+`dolphin-easy-convert --check` confirms the protections are in place.
 
 ## Install
 
@@ -86,7 +129,7 @@ scale-down cap.
 git clone https://github.com/dalekcoffee/Dolphin-Easy-Convert.git
 cd Dolphin-Easy-Convert
 
-sudo dnf install rpm-build python3-devel libappstream-glib   # build-time only
+sudo dnf install rpm-build python3-devel libappstream-glib desktop-file-utils   # build-time only
 ./build-rpm.sh
 sudo dnf install ./dist/dolphin-easy-convert-*.noarch.rpm
 ```
@@ -145,7 +188,15 @@ src/dolphin_easy_convert/
   runner.py    subprocess execution + progress parsing
   ui.py        the PyQt6 window
   main.py      CLI entry point used by the menu files
+  magick/      extra ImageMagick security policy (local only)
 servicemenus/  three .desktop files (video, audio, image)
-packaging/     RPM spec, AppStream metainfo, /usr/bin launcher
+packaging/     RPM spec, AppStream metainfo, /usr/bin launcher, hidden .desktop
+tests/         standard-library unit tests (run during the RPM build)
 tools/         one-off probes used to verify KDE behaviour; not packaged
+```
+
+Run the tests from the repository root:
+
+```bash
+python3 -m unittest discover -s tests
 ```

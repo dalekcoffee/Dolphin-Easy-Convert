@@ -1,7 +1,7 @@
 %global appid io.github.dalekcoffee.DolphinEasyConvert
 
 Name:           dolphin-easy-convert
-Version:        0.1.3
+Version:        0.2.0
 Release:        1%{?dist}
 Summary:        Right-click media conversion for Dolphin using ffmpeg and ImageMagick
 
@@ -12,6 +12,7 @@ Source0:        %{name}-%{version}.tar.gz
 BuildArch:      noarch
 BuildRequires:  python3-devel
 BuildRequires:  libappstream-glib
+BuildRequires:  desktop-file-utils
 
 Requires:       python3
 Requires:       python3-pyqt6
@@ -55,6 +56,11 @@ install -d %{buildroot}%{python3_sitelib}/dolphin_easy_convert
 install -p -m 0644 src/dolphin_easy_convert/*.py \
     %{buildroot}%{python3_sitelib}/dolphin_easy_convert/
 
+# Extra ImageMagick security policy (no network, no script interpreters),
+# loaded by the package's own magick processes only.
+install -D -p -m 0644 src/dolphin_easy_convert/magick/policy.xml \
+    %{buildroot}%{python3_sitelib}/dolphin_easy_convert/magick/policy.xml
+
 install -D -p -m 0755 packaging/dolphin-easy-convert \
     %{buildroot}%{_bindir}/dolphin-easy-convert
 
@@ -64,13 +70,21 @@ install -d %{buildroot}%{_datadir}/kio/servicemenus
 install -p -m 0644 servicemenus/*.desktop \
     %{buildroot}%{_datadir}/kio/servicemenus/
 
+# Hidden (NoDisplay) entry: names the window and its notifications.
+install -D -p -m 0644 packaging/%{name}.desktop \
+    %{buildroot}%{_datadir}/applications/%{name}.desktop
+
 install -D -p -m 0644 packaging/%{appid}.metainfo.xml \
-    %{buildroot}%{_metainfodir}/%{appid}.metainfo.xml
+    %{buildroot}%{_datadir}/applications/%{name}.desktop
+%{_metainfodir}/%{appid}.metainfo.xml
 
 install -D -p -m 0644 LICENSE \
     %{buildroot}%{_licensedir}/%{name}/LICENSE
 
 %check
+# The project's own tests: standard library only, no network.
+%{python3} -m unittest discover -s tests -v
+desktop-file-validate %{buildroot}%{_datadir}/applications/%{name}.desktop
 appstream-util validate-relax --nonet \
     %{buildroot}%{_metainfodir}/%{appid}.metainfo.xml
 
@@ -85,7 +99,28 @@ appstream-util validate-relax --nonet \
 %{_metainfodir}/%{appid}.metainfo.xml
 
 %changelog
-* Sun Nov 08 2026 Dalek <dalekcoffee@users.noreply.github.com> - 0.1.3-1
+* Sun Nov 08 2026 Dalek <dalekcoffee@users.noreply.github.com> - 0.2.0-1
+- New presets: MP4 (small, for sharing), MP4 (fast, no re-encode) and
+  JPEG (remove location & camera info)
+- Keep every audio track in video conversions, and album art in MP3, M4A
+  and FLAC; keep the original file dates on converted files
+- Photos are rotated upright from their EXIF orientation; H.264 output is
+  8-bit 4:2:0 so it plays everywhere
+- New placement mode: replace the originals, sending the old files to the
+  Trash where they can be restored
+- Options page previews where files will go and which will be skipped;
+  optional "start straight away" for menu formats
+- Quality as plain choices (Smaller file / Higher quality / Best quality),
+  exact numbers still available
+- Progress window lists every file with its result and size change, shows
+  time remaining, can skip one file, offers "Show in folder", reports space
+  saved and sends a notification if the window is in the background
+- Errors explained in plain language, raw output under Technical details
+- Local-only hardening: ffmpeg and ffprobe may open local files only
+  (-protocol_whitelist file); an extra ImageMagick policy blocks URL
+  coders, the curl delegate, script interpreters and Ghostscript
+- Tools are taken from /usr/bin before $PATH; the launcher runs Python in
+  isolated mode (-I) so no user-installed module can be imported
 - Fix files in one batch with the same name (clip.mkv, clip.mov) being
   planned onto the same output, the second overwriting the first
 - Place finished files with an atomic no-replace move, so nothing that

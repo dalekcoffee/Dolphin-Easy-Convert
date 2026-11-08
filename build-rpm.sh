@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Build the dolphin-easy-convert RPM from this checkout.
 #
-# Needs: rpm-build, libappstream-glib   (sudo dnf install rpm-build libappstream-glib)
+# Needs: rpm-build, python3-devel, libappstream-glib, desktop-file-utils
 # Produces: dist/dolphin-easy-convert-<version>-<release>.noarch.rpm
 #
 # This script only builds. It never installs anything and never calls sudo.
@@ -18,8 +18,9 @@ VERSION=$(awk '/^Version:/ {print $2; exit}' "$SPEC")
 # reported once here rather than as an rpmbuild failure part way through.
 #   python3-devel      provides the %{python3_sitelib} macro
 #   libappstream-glib  provides appstream-util for the %check step
+#   desktop-file-utils provides desktop-file-validate for the %check step
 missing=()
-for pkg in rpm-build python3-devel libappstream-glib; do
+for pkg in rpm-build python3-devel libappstream-glib desktop-file-utils; do
   rpm -q "$pkg" >/dev/null 2>&1 || missing+=("$pkg")
 done
 if (( ${#missing[@]} )); then

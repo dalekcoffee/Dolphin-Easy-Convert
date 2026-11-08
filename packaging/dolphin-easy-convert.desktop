@@ -1,0 +1,12 @@
+[Desktop Entry]
+# Gives the conversion window its name and icon in the task bar and in
+# notifications. Hidden from menus: the tool is used from Dolphin's
+# right-click "Convert To" submenu, not launched on its own.
+Type=Application
+Name=Easy Convert
+Comment=Convert audio, video and image files
+Icon=applications-multimedia
+Exec=dolphin-easy-convert --custom %F
+NoDisplay=true
+Terminal=false
+Categories=AudioVideo;Graphics;
